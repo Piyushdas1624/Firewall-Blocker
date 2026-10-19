@@ -1,7 +1,7 @@
 <#
 .SYNOPSIS
-    Windows Firewall - Advanced Recursive Executable Blocker (FirewallBlocker)
-    Cross-Platform: Compatible with Windows 7, 8, 8.1, 10, 11 and Windows Server (2008 R2 - 2025).
+    Windows Firewall - Universal Recursive Executable Blocker (FirewallBlocker)
+    Compatibility: Windows 7 SP1, 8, 8.1, 10, 11 and Windows Server (2008 R2 - 2025).
     PowerShell: Compatible with PowerShell 2.0, 3.0, 4.0, 5.1, 7.x+
 
 .DESCRIPTION
@@ -13,12 +13,11 @@
     Supports remote one-liner execution:
     - irm https://raw.githubusercontent.com/Piyushdas1624/Firewall_bat/main/run.ps1 | iex
     - iex (curl.exe -s --doh-url https://1.1.1.1/dns-query https://raw.githubusercontent.com/Piyushdas1624/Firewall_bat/main/run.ps1 | Out-String)
-    - Legacy Windows 7:
+    - Legacy Windows 7 SP1:
       powershell -nop -ep bypass -c "[Net.ServicePointManager]::SecurityProtocol=3072; iex ((New-Object Net.WebClient).DownloadString('https://raw.githubusercontent.com/Piyushdas1624/Firewall_bat/main/run.ps1'))"
 
 .PARAMETER TargetDir
-    The target directory to scan and apply firewall rules to. If omitted, defaults to the
-    current working directory or folder where the script is located.
+    The target directory to scan and apply firewall rules to.
 
 .PARAMETER Action
     Non-interactive action: BlockBoth, BlockOutbound, BlockInbound, UnblockDir, UnblockAll, Scan, Audit.
@@ -46,16 +45,20 @@ param(
 )
 
 # ------------------------------------------------------------------------------
-# 1. Environment & PowerShell 2.0 - 7.x Compatibility Setup
+# 1. Environment & TLS 1.2 Setup across all .NET / PowerShell Versions
 # ------------------------------------------------------------------------------
-# Ensure TLS 1.2 is enabled for any web requests across all .NET versions
 try {
-    [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
+    # Tls12 is 3072. Use bitwise OR to keep existing protocols enabled while adding TLS 1.2
+    [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor [System.Net.SecurityProtocolType]3072
 } catch {
-    # Non-critical on offline systems
+    try {
+        [System.Net.ServicePointManager]::SecurityProtocol = 3072
+    } catch {
+        # Offline or older system without KB3154518
+    }
 }
 
-# Resolve script directory in a way that works in PS 2.0, 3.0+, and in-memory execution
+# Resolve running mode (File vs In-Memory IEX)
 $Script:RunningFromFile = $false
 $Script:ScriptFilePath = ""
 if ($MyInvocation -and $MyInvocation.MyCommand -and $MyInvocation.MyCommand.Path) {
@@ -63,28 +66,106 @@ if ($MyInvocation -and $MyInvocation.MyCommand -and $MyInvocation.MyCommand.Path
     $Script:RunningFromFile = [System.IO.File]::Exists($Script:ScriptFilePath)
 }
 
-# Target directory resolution logic
-if ([string]::IsNullOrEmpty($TargetDir)) {
-    if (-not [string]::IsNullOrEmpty($InitialDir) -and (Test-Path -LiteralPath $InitialDir)) {
-        $TargetDir = $InitialDir
-    } elseif ($Script:RunningFromFile) {
-        $TargetDir = Split-Path -Parent $Script:ScriptFilePath
-    } else {
-        $TargetDir = (Get-Location).Path
-    }
-}
-
-# Normalize target path
-try {
-    if (Test-Path -LiteralPath $TargetDir) {
-        $TargetDir = (Get-Item -LiteralPath $TargetDir).FullName
-    }
-} catch {
-    # Keep as entered if resolving fails
+# Store self-content for reliable offline elevation if running via IEX
+$Script:SelfCode = ""
+if ($MyInvocation -and $MyInvocation.MyCommand -and $MyInvocation.MyCommand.ScriptBlock) {
+    $Script:SelfCode = $MyInvocation.MyCommand.ScriptBlock.ToString()
 }
 
 # ------------------------------------------------------------------------------
-# 2. Console Color & Formatting Helpers
+# 2. System Validation & Safety Checks
+# ------------------------------------------------------------------------------
+function Test-IsAdmin {
+    try {
+        $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+        $principal = New-Object Security.Principal.WindowsPrincipal($identity)
+        return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    } catch {
+        return $false
+    }
+}
+
+function Test-IsProtectedSystemPath {
+    param([string]$PathToCheck)
+    if ([string]::IsNullOrEmpty($PathToCheck)) { return $true }
+    
+    try {
+        $resolved = [System.IO.Path]::GetFullPath($PathToCheck).TrimEnd('\', '/')
+    } catch {
+        return $false
+    }
+    
+    # Safe resolution using environment variables compatible with all Windows versions (Win 7 - 11)
+    $winDir = $env:SystemRoot
+    if ([string]::IsNullOrEmpty($winDir)) { $winDir = $env:windir }
+    if ([string]::IsNullOrEmpty($winDir)) { $winDir = "C:\Windows" }
+    $winDir = $winDir.TrimEnd('\', '/')
+
+    $sysDrive = $env:SystemDrive
+    if ([string]::IsNullOrEmpty($sysDrive)) { $sysDrive = "C:" }
+    $sysDriveRoot = $sysDrive.TrimEnd('\') + "\"
+
+    # 1. Reject Windows root directory and any subdirectory (System32, SysWOW64, WinSxS, etc.)
+    if ($resolved.Equals($winDir, [System.StringComparison]::OrdinalIgnoreCase) -or
+        $resolved.StartsWith($winDir + "\", [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $true
+    }
+
+    # 2. Reject root of system drive (e.g. C:\ or C:)
+    if ($resolved.Equals($sysDrive, [System.StringComparison]::OrdinalIgnoreCase) -or
+        $resolved.Equals($sysDriveRoot.TrimEnd('\'), [System.StringComparison]::OrdinalIgnoreCase) -or
+        $resolved -match '^[A-Za-z]:[\\/]?$') {
+        return $true
+    }
+
+    # 3. Reject Windows Defender / Security folders
+    $progFiles = $env:ProgramFiles
+    if (-not [string]::IsNullOrEmpty($progFiles)) {
+        $defender = (Join-Path $progFiles "Windows Defender").TrimEnd('\', '/')
+        if ($resolved.Equals($defender, [System.StringComparison]::OrdinalIgnoreCase) -or
+            $resolved.StartsWith($defender + "\", [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $true
+        }
+    }
+
+    return $false
+}
+
+# Target directory initialization logic
+# Prevent accidental targeting of Windows\System32 when running from elevated console or web one-liner!
+if ([string]::IsNullOrEmpty($TargetDir)) {
+    if (-not [string]::IsNullOrEmpty($InitialDir) -and (Test-Path -LiteralPath $InitialDir) -and (-not (Test-IsProtectedSystemPath -PathToCheck $InitialDir))) {
+        $TargetDir = $InitialDir
+    } elseif ($Script:RunningFromFile) {
+        $scriptParent = Split-Path -Parent $Script:ScriptFilePath
+        if (-not (Test-IsProtectedSystemPath -PathToCheck $scriptParent)) {
+            $TargetDir = $scriptParent
+        } else {
+            $TargetDir = ""
+        }
+    } else {
+        $cwd = (Get-Location).Path
+        if (-not (Test-IsProtectedSystemPath -PathToCheck $cwd)) {
+            $TargetDir = $cwd
+        } else {
+            $TargetDir = ""
+        }
+    }
+}
+
+# Normalize target path if provided
+if (-not [string]::IsNullOrEmpty($TargetDir)) {
+    try {
+        if (Test-Path -LiteralPath $TargetDir) {
+            $TargetDir = (Get-Item -LiteralPath $TargetDir).FullName
+        }
+    } catch {
+        # Keep as entered
+    }
+}
+
+# ------------------------------------------------------------------------------
+# 3. Console Color & Formatting Helpers
 # ------------------------------------------------------------------------------
 function Write-Color {
     param(
@@ -103,8 +184,30 @@ function Write-Banner {
     Clear-Host
     Write-Host "==============================================================================" -ForegroundColor Cyan
     Write-Host "         FIREWALL BLOCKER - RECURSIVE WINDOWS FIREWALL MANAGER                " -ForegroundColor White
-    Write-Host "       Windows 7 / 8 / 8.1 / 10 / 11 | Production Grade | Version 2.0        " -ForegroundColor DarkCyan
+    Write-Host "       Windows 7 / 8 / 8.1 / 10 / 11 | Production Grade | Version 2.1        " -ForegroundColor DarkCyan
     Write-Host "==============================================================================" -ForegroundColor Cyan
+}
+
+# Cache for executable counting so menu loops render in < 1ms without disk lag
+$Script:CachedDir = ""
+$Script:CachedExeCount = -1
+
+function Get-CachedExecutableCount {
+    param([string]$Dir)
+    if ([string]::IsNullOrEmpty($Dir) -or -not (Test-Path -LiteralPath $Dir) -or (Test-IsProtectedSystemPath -PathToCheck $Dir)) {
+        return 0
+    }
+    if ($Script:CachedDir -eq $Dir -and $Script:CachedExeCount -ge 0) {
+        return $Script:CachedExeCount
+    }
+    try {
+        $exes = Get-TargetExecutables -PathToScan $Dir
+        $Script:CachedDir = $Dir
+        $Script:CachedExeCount = $exes.Count
+        return $Script:CachedExeCount
+    } catch {
+        return 0
+    }
 }
 
 function Write-StatusCard {
@@ -113,23 +216,25 @@ function Write-StatusCard {
     $isAdmin = Test-IsAdmin
     $svcInfo = Test-FirewallService
     
-    $exeCount = 0
-    if (Test-Path -LiteralPath $Dir) {
-        try {
-            $exeCount = @(Get-ChildItem -LiteralPath $Dir -Filter "*.exe" -Recurse -ErrorAction SilentlyContinue).Count
-        } catch {
-            $exeCount = 0
-        }
+    Write-Host "  Target Root Folder : " -ForegroundColor Gray -NoNewline
+    if ([string]::IsNullOrEmpty($Dir)) {
+        Write-Host "[NOT SET] - Drag & drop a folder or select Option 7" -ForegroundColor Yellow
+    } elseif (Test-IsProtectedSystemPath -PathToCheck $Dir) {
+        Write-Host "$Dir [PROTECTED SYSTEM FOLDER - CANNOT BLOCK]" -ForegroundColor Red
+    } else {
+        Write-Host "$Dir" -ForegroundColor Yellow
     }
 
-    Write-Host "  Target Root Folder : " -ForegroundColor Gray -NoNewline
-    Write-Host "$Dir" -ForegroundColor Yellow
-
     Write-Host "  Discovered .EXEs   : " -ForegroundColor Gray -NoNewline
-    if ($exeCount -gt 0) {
-        Write-Host "$exeCount executable(s) found" -ForegroundColor Green
+    if ([string]::IsNullOrEmpty($Dir) -or (Test-IsProtectedSystemPath -PathToCheck $Dir)) {
+        Write-Host "None (Select target folder first)" -ForegroundColor DarkGray
     } else {
-        Write-Host "0 executables found" -ForegroundColor DarkGray
+        $exeCount = Get-CachedExecutableCount -Dir $Dir
+        if ($exeCount -gt 0) {
+            Write-Host "$exeCount executable(s) found" -ForegroundColor Green
+        } else {
+            Write-Host "0 executables found" -ForegroundColor DarkGray
+        }
     }
 
     Write-Host "  Firewall Service   : " -ForegroundColor Gray -NoNewline
@@ -137,32 +242,22 @@ function Write-StatusCard {
         Write-Host "RUNNING" -ForegroundColor Green -NoNewline
         Write-Host " (MpsSvc)" -ForegroundColor DarkGray
     } else {
-        Write-Host "STOPPED / DISABLED" -ForegroundColor Red -NoNewline
-        Write-Host " (MpsSvc) [!]" -ForegroundColor Yellow
+        Write-Host "$($svcInfo.Status.ToUpper())" -ForegroundColor Red -NoNewline
+        Write-Host " (MpsSvc) [! Service must be running]" -ForegroundColor Yellow
     }
 
     Write-Host "  Admin Privileges   : " -ForegroundColor Gray -NoNewline
     if ($isAdmin) {
         Write-Host "ELEVATED (Administrator)" -ForegroundColor Green
     } else {
-        Write-Host "STANDARD USER (Elevation will be requested)" -ForegroundColor Yellow
+        Write-Host "STANDARD USER (Elevation will be requested on action)" -ForegroundColor Yellow
     }
     Write-Host "==============================================================================" -ForegroundColor Cyan
 }
 
 # ------------------------------------------------------------------------------
-# 3. System Validation & Safety Checks
+# 4. Elevation Engine
 # ------------------------------------------------------------------------------
-function Test-IsAdmin {
-    try {
-        $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
-        $principal = New-Object Security.Principal.WindowsPrincipal($identity)
-        return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-    } catch {
-        return $false
-    }
-}
-
 function Assert-Elevated {
     param(
         [string]$CurrentTargetDir,
@@ -172,8 +267,10 @@ function Assert-Elevated {
     if (Test-IsAdmin) { return $true }
 
     Write-Host ""
-    Write-Host "  [!] Administrator privileges are required to manage Windows Firewall rules." -ForegroundColor Yellow
-    Write-Host "  [*] Requesting User Account Control (UAC) elevation..." -ForegroundColor Cyan
+    Write-Host "  ==========================================================================" -ForegroundColor Yellow
+    Write-Host "  [ELEVATION REQUIRED] Administrative privileges are needed for firewall rules" -ForegroundColor White
+    Write-Host "  ==========================================================================" -ForegroundColor Yellow
+    Write-Host "  Requesting Windows User Account Control (UAC) elevation..." -ForegroundColor Cyan
 
     $argsToPass = ""
     if (-not [string]::IsNullOrEmpty($CurrentTargetDir)) {
@@ -198,61 +295,30 @@ function Assert-Elevated {
             return $false
         }
     } else {
-        # Running in-memory (e.g. irm | iex). Write a temporary launcher script.
+        # Running in-memory (e.g. irm | iex). Write self script content to temp file.
         $tempScript = Join-Path $env:TEMP "FirewallBlocker_Elevated.ps1"
         try {
-            # Download or write current script content to temp file
-            $webContent = (New-Object System.Net.WebClient).DownloadString("https://raw.githubusercontent.com/Piyushdas1624/Firewall_bat/main/run.ps1")
-            [System.IO.File]::WriteAllText($tempScript, $webContent, [System.Text.Encoding]::UTF8)
+            if (-not [string]::IsNullOrEmpty($Script:SelfCode)) {
+                [System.IO.File]::WriteAllText($tempScript, $Script:SelfCode, [System.Text.Encoding]::UTF8)
+            } else {
+                # Fallback: fetch from repository if self-code unavailable
+                $webContent = (New-Object System.Net.WebClient).DownloadString("https://raw.githubusercontent.com/Piyushdas1624/Firewall_bat/main/run.ps1")
+                [System.IO.File]::WriteAllText($tempScript, $webContent, [System.Text.Encoding]::UTF8)
+            }
             $psiArgs = "-NoProfile -ExecutionPolicy Bypass -File `"$tempScript`"$argsToPass"
             Start-Process -FilePath "powershell.exe" -ArgumentList $psiArgs -Verb RunAs
             exit 0
         } catch {
-            Write-Host "  [FAIL] Could not initiate elevated web launcher: $($_.Exception.Message)" -ForegroundColor Red
+            Write-Host "  [FAIL] Could not initiate elevated launcher: $($_.Exception.Message)" -ForegroundColor Red
             if ($IsNonInteractive) { exit 1 }
             return $false
         }
     }
 }
 
-function Test-IsProtectedSystemPath {
-    param([string]$PathToCheck)
-    if ([string]::IsNullOrEmpty($PathToCheck)) { return $true }
-    
-    try {
-        $resolved = [System.IO.Path]::GetFullPath($PathToCheck).TrimEnd('\', '/')
-    } catch {
-        return $false
-    }
-    
-    $winDir = [System.Environment]::GetFolderPath('Windows').TrimEnd('\', '/')
-    $sysDrive = [System.Environment]::GetEnvironmentVariable('SystemDrive')
-    if ([string]::IsNullOrEmpty($sysDrive)) { $sysDrive = "C:" }
-    $sysDriveRoot = $sysDrive.TrimEnd('\') + "\"
-
-    # 1. Reject Windows root directory and any subdirectory (System32, SysWOW64, etc.)
-    if ($resolved.Equals($winDir, [System.StringComparison]::OrdinalIgnoreCase) -or
-        $resolved.StartsWith($winDir + "\", [System.StringComparison]::OrdinalIgnoreCase)) {
-        return $true
-    }
-
-    # 2. Reject root of system drive (e.g. C:\ or C:)
-    if ($resolved.Equals($sysDrive, [System.StringComparison]::OrdinalIgnoreCase) -or
-        $resolved.Equals($sysDriveRoot.TrimEnd('\'), [System.StringComparison]::OrdinalIgnoreCase) -or
-        $resolved -match '^[A-Za-z]:[\\/]?$') {
-        return $true
-    }
-
-    # 3. Reject Windows Defender folder
-    $progFiles = [System.Environment]::GetFolderPath('ProgramFiles')
-    $defender = Join-Path $progFiles "Windows Defender"
-    if ($resolved.StartsWith($defender, [System.StringComparison]::OrdinalIgnoreCase)) {
-        return $true
-    }
-
-    return $false
-}
-
+# ------------------------------------------------------------------------------
+# 5. Firewall Service Health & Healing
+# ------------------------------------------------------------------------------
 function Test-FirewallService {
     try {
         $svc = Get-Service -Name MpsSvc -ErrorAction SilentlyContinue
@@ -283,30 +349,31 @@ function Ensure-FirewallServiceRunning {
     if ($svcInfo.Running) { return $true }
 
     Write-Host ""
-    Write-Host "  [!] WARNING: Windows Firewall service (MpsSvc) is $($svcInfo.Status)." -ForegroundColor Yellow
+    Write-Host "  [!] WARNING: Windows Defender Firewall service (MpsSvc) is $($svcInfo.Status)." -ForegroundColor Yellow
     Write-Host "      Windows cannot create or enforce firewall rules while this service is stopped." -ForegroundColor DarkYellow
     Write-Host ""
     
     if ($NonInteractive) {
-        Write-Host "  [*] NonInteractive mode: Attempting to start MpsSvc automatically..." -ForegroundColor Cyan
+        Write-Host "  [*] NonInteractive mode: Attempting to configure and start MpsSvc..." -ForegroundColor Cyan
         $choice = "Y"
     } else {
-        $choice = Read-Host "  Would you like to start Windows Firewall service now? [Y/N]"
+        $choice = Read-Host "  Would you like to automatically configure and start Windows Firewall service now? [Y/N]"
     }
 
     if ($choice -match '^[Yy]') {
-        Write-Host "  [*] Starting MpsSvc..." -ForegroundColor Cyan
+        Write-Host "  [*] Configuring MpsSvc to Automatic startup and starting..." -ForegroundColor Cyan
         try {
-            Start-Service -Name MpsSvc -ErrorAction Stop
+            # Use sc.exe config for universal compatibility across Win 7 - 11 even if Disabled
+            $null = Start-Process -FilePath "sc.exe" -ArgumentList "config MpsSvc start= auto" -NoNewWindow -Wait
+            $null = Start-Process -FilePath "sc.exe" -ArgumentList "start MpsSvc" -NoNewWindow -Wait
             Start-Sleep -Seconds 1
             $newSvc = Get-Service -Name MpsSvc -ErrorAction SilentlyContinue
             if ($newSvc -and $newSvc.Status -eq [System.ServiceProcess.ServiceControllerStatus]::Running) {
-                Write-Host "  [OK] Windows Firewall service started successfully." -ForegroundColor Green
+                Write-Host "  [OK] Windows Defender Firewall service is now ACTIVE and RUNNING." -ForegroundColor Green
                 return $true
             }
         } catch {
             Write-Host "  [FAIL] Failed to start service: $($_.Exception.Message)" -ForegroundColor Red
-            Write-Host "         Please check if the service is set to 'Disabled' in services.msc." -ForegroundColor Yellow
             return $false
         }
     }
@@ -314,18 +381,19 @@ function Ensure-FirewallServiceRunning {
 }
 
 # ------------------------------------------------------------------------------
-# 4. Low-Level Netsh Execution & Rule Naming Engine
+# 6. FIPS-Compliant Hash & Low-Level Netsh Engine
 # ------------------------------------------------------------------------------
 function Get-PortableHash {
     param([string]$InputString)
     try {
+        # SHA256 is FIPS-compliant across all Windows versions (Win 7 - 11)
         $bytes = [System.Text.Encoding]::UTF8.GetBytes($InputString.ToLowerInvariant())
-        $hasher = [System.Security.Cryptography.MD5]::Create()
+        $hasher = [System.Security.Cryptography.SHA256]::Create()
         $hashBytes = $hasher.ComputeHash($bytes)
         $hex = [System.BitConverter]::ToString($hashBytes).Replace("-", "")
         return $hex.Substring(0, 8)
     } catch {
-        # Fallback pseudo-hash based on string length and char codes
+        # Fallback pseudo-hash
         $sum = 0
         foreach ($c in $InputString.ToCharArray()) { $sum = ($sum * 31 + [int]$c) -band 0x7FFFFFFF }
         return $sum.ToString("X8")
@@ -339,21 +407,19 @@ function Invoke-Netsh {
     $psi.FileName = "netsh.exe"
     $psi.Arguments = $Arguments
     $psi.RedirectStandardOutput = $true
-    $psi.RedirectStandardError = $true
     $psi.UseShellExecute = $false
     $psi.CreateNoWindow = $true
 
     try {
         $proc = [System.Diagnostics.Process]::Start($psi)
         $stdout = $proc.StandardOutput.ReadToEnd()
-        $stderr = $proc.StandardError.ReadToEnd()
         $proc.WaitForExit()
 
-        $combined = ($stdout + "`n" + $stderr).Trim()
+        $output = $stdout.Trim()
         return @{
             ExitCode = $proc.ExitCode
             Success  = ($proc.ExitCode -eq 0)
-            Output   = $combined
+            Output   = $output
         }
     } catch {
         return @{
@@ -364,15 +430,62 @@ function Invoke-Netsh {
     }
 }
 
+function Format-HumanFirewallError {
+    param(
+        [string]$RawOutput,
+        [int]$ExitCode,
+        [string]$ExePath,
+        [string]$Direction,
+        [string]$RuleName
+    )
+
+    $diagnosis = @{
+        Component    = "Windows Defender Firewall (netsh)"
+        Location     = "Network Subsystem"
+        ExePath      = $ExePath
+        Direction    = $Direction
+        RuleName     = $RuleName
+        RawMessage   = $RawOutput
+        RootCause    = "Unknown network shell error."
+        ActionableFix = "Verify Windows Firewall status and try again."
+    }
+
+    if ($RawOutput -match "(?i)(requires elevation|access is denied|run as administrator)") {
+        $diagnosis.Location = "Windows Security Token (UAC)"
+        $diagnosis.RootCause = "Administrator privileges were lost, revoked, or denied."
+        $diagnosis.ActionableFix = "Right-click PowerShell or Terminal and select 'Run as administrator'."
+    } elseif ($RawOutput -match "(?i)(attempting to contact the Windows Firewall service|service has not been started|0x6D9|1753|RPC)") {
+        $diagnosis.Location = "Windows Service Manager (MpsSvc)"
+        $diagnosis.RootCause = "The Windows Defender Firewall service (MpsSvc) is stopped, disabled, or RPC is unreachable."
+        $diagnosis.ActionableFix = "Press [9] in the menu or run 'services.msc' and start the 'Windows Defender Firewall' service."
+    } elseif ($RawOutput -match "(?i)(Group Policy|policy does not allow|blocked by policy)") {
+        $diagnosis.Location = "Active Directory / Local Group Policy"
+        $diagnosis.RootCause = "Domain or Local Group Policy explicitly restricts local firewall rule creation."
+        $diagnosis.ActionableFix = "Check 'Computer Configuration -> Windows Settings -> Security Settings -> Windows Firewall' in gpedit.msc."
+    } elseif ($ExePath.Length -gt 250) {
+        $diagnosis.Location = "Win32 File Subsystem (MAX_PATH)"
+        $diagnosis.RootCause = "The executable file path ($($ExePath.Length) chars) approaches or exceeds the Windows 260-character MAX_PATH limit."
+        $diagnosis.ActionableFix = "Move the target folder to a shorter path (e.g. C:\Games) or enable Win32 Long Paths in Windows."
+    } elseif ($RawOutput -match "(?i)(parameter is incorrect|syntax of the command)") {
+        $diagnosis.Location = "Command Parser"
+        $diagnosis.RootCause = "The executable path contains unsupported characters or unbalanced formatting."
+        $diagnosis.ActionableFix = "Ensure the directory name does not contain illegal special characters."
+    } else {
+        $diagnosis.RootCause = "netsh exited with non-zero code ($ExitCode): $RawOutput"
+    }
+
+    return $diagnosis
+}
+
 function Get-RuleName {
     param(
         [string]$Direction, # "IN" or "OUT"
         [string]$ExeName,
         [string]$FullPath
     )
+    $cleanExe = $ExeName.Replace('"', '')
     $hash = Get-PortableHash -InputString $FullPath
-    # Keep rule name safe and under 255 chars
-    $namePrefix = "[FWB-$Direction] $ExeName"
+    $namePrefix = "[FWB-$Direction] $cleanExe"
     if ($namePrefix.Length -gt 230) {
         $namePrefix = $namePrefix.Substring(0, 230)
     }
@@ -381,11 +494,13 @@ function Get-RuleName {
 
 function Get-TargetExecutables {
     param([string]$PathToScan)
-    if (-not (Test-Path -LiteralPath $PathToScan)) {
+    if ([string]::IsNullOrEmpty($PathToScan) -or -not (Test-Path -LiteralPath $PathToScan)) {
         return @()
     }
     try {
-        $items = Get-ChildItem -LiteralPath $PathToScan -Filter "*.exe" -Recurse -Force -ErrorAction SilentlyContinue
+        # Exclude directories ending in .exe using PSIsContainer for universal PS 2.0-7.x compatibility
+        $items = Get-ChildItem -LiteralPath $PathToScan -Filter "*.exe" -Recurse -Force -ErrorAction SilentlyContinue |
+                 Where-Object { -not $_.PSIsContainer -and $_.Extension -match '^\.exe$' }
         return @($items)
     } catch {
         return @()
@@ -398,17 +513,16 @@ function Test-ExecutableRuleStatus {
         [string]$ExeName
     )
     $hash = Get-PortableHash -InputString $ExePath
-    $inRule = "[FWB-IN] $ExeName ($hash)"
-    $outRule = "[FWB-OUT] $ExeName ($hash)"
+    $inRule = "[FWB-IN] $($ExeName.Replace('"', '')) ($hash)"
+    $outRule = "[FWB-OUT] $($ExeName.Replace('"', '')) ($hash)"
     
-    # Query netsh for rule existence
     $checkIn = Invoke-Netsh -Arguments "advfirewall firewall show rule name=`"$inRule`""
     $checkOut = Invoke-Netsh -Arguments "advfirewall firewall show rule name=`"$outRule`""
     
     $inBlocked = ($checkIn.Success -and $checkIn.Output -match "Action:\s+Block")
     $outBlocked = ($checkOut.Success -and $checkOut.Output -match "Action:\s+Block")
 
-    # Also check legacy rules
+    # Also check legacy rule formats
     if (-not $inBlocked) {
         $legacyIn = Invoke-Netsh -Arguments "advfirewall firewall show rule name=`"[FolderBlock-IN] $ExeName`""
         if ($legacyIn.Success -and $legacyIn.Output -match "Action:\s+Block") { $inBlocked = $true }
@@ -425,13 +539,40 @@ function Test-ExecutableRuleStatus {
 }
 
 # ------------------------------------------------------------------------------
-# 5. High-Level Operations (Block, Unblock, Scan, System Clean)
+# 7. High-Level Operations (Block, Unblock, Scan, System Clean)
 # ------------------------------------------------------------------------------
+function Select-DirectoryIfEmpty {
+    if ([string]::IsNullOrEmpty($Script:CurrentTarget) -or -not (Test-Path -LiteralPath $Script:CurrentTarget)) {
+        Write-Host ""
+        Write-Host "  ==========================================================================" -ForegroundColor Yellow
+        Write-Host "  [SELECT TARGET FOLDER] Please specify the folder containing .exe files    " -ForegroundColor White
+        Write-Host "  ==========================================================================" -ForegroundColor Yellow
+        Write-Host "  Tip: You can drag and drop any folder directly into this console window!" -ForegroundColor Cyan
+        $newPath = Read-Host "  Folder Path"
+        if ([string]::IsNullOrEmpty($newPath)) { return $false }
+        
+        $cleaned = $newPath.Trim('"', "'", ' ')
+        if (-not (Test-Path -LiteralPath $cleaned)) {
+            Write-Host "  [FAIL] Folder does not exist: $cleaned" -ForegroundColor Red
+            Start-Sleep -Seconds 2
+            return $false
+        }
+        $Script:CurrentTarget = (Get-Item -LiteralPath $cleaned).FullName
+        $Script:CachedExeCount = -1
+    }
+    return $true
+}
+
 function Invoke-BlockOperation {
     param(
         [string]$Dir,
         [string]$Mode # "Both", "OutboundOnly", "InboundOnly"
     )
+
+    if ([string]::IsNullOrEmpty($Dir)) {
+        if (-not (Select-DirectoryIfEmpty)) { return }
+        $Dir = $Script:CurrentTarget
+    }
 
     if (Test-IsProtectedSystemPath -PathToCheck $Dir) {
         Write-Host ""
@@ -453,14 +594,14 @@ function Invoke-BlockOperation {
     }
 
     if (-not (Ensure-FirewallServiceRunning)) {
-        Write-Host "  [ABORT] Cannot proceed without Windows Firewall service." -ForegroundColor Red
+        Write-Host "  [ABORT] Cannot proceed without Windows Defender Firewall service." -ForegroundColor Red
         if (-not $NonInteractive) { Read-Host "`n  Press ENTER to return to menu..."; return }
         exit 3
     }
 
     Write-Host ""
     Write-Host "  --------------------------------------------------------------------------" -ForegroundColor Cyan
-    Write-Host "  BLOCKING OPERATION STARTED: Mode = $Mode" -ForegroundColor White
+    Write-Host "  BLOCKING OPERATION: Applying Windows Firewall Rules (Mode: $Mode)" -ForegroundColor White
     Write-Host "  Target: $Dir" -ForegroundColor Yellow
     Write-Host "  --------------------------------------------------------------------------" -ForegroundColor Cyan
 
@@ -478,7 +619,7 @@ function Invoke-BlockOperation {
     $processedCount = 0
     $successRules = 0
     $failRules = 0
-    $failedExes = New-Object System.Collections.ArrayList
+    $diagnostics = New-Object System.Collections.ArrayList
 
     foreach ($exe in $exes) {
         $processedCount++
@@ -492,13 +633,8 @@ function Invoke-BlockOperation {
         Write-Host ("  [{0,3}/{1,-3}] {2}" -f $processedCount, $exes.Count, $exeName) -ForegroundColor White
         Write-Host "          Path: $exePath" -ForegroundColor DarkGray
 
-        $inSuccess = $true
-        $outSuccess = $true
-        $failDetails = @()
-
         # Inbound Rule
         if ($Mode -eq "Both" -or $Mode -eq "InboundOnly") {
-            # Delete old/duplicate rule first
             $null = Invoke-Netsh -Arguments "advfirewall firewall delete rule name=`"$inRuleName`""
             $null = Invoke-Netsh -Arguments "advfirewall firewall delete rule name=`"[FolderBlock-IN] $exeName`" program=`"$exePath`""
 
@@ -508,21 +644,22 @@ function Invoke-BlockOperation {
             if ($resIn.Success) {
                 $successRules++
                 Write-Host "          [+] INBOUND  : " -ForegroundColor DarkGray -NoNewline
-                Write-Host "[OK] Rule Created" -ForegroundColor Green -NoNewline
+                Write-Host "[OK] Blocked" -ForegroundColor Green -NoNewline
                 Write-Host " ('$inRuleName')" -ForegroundColor DarkCyan
             } else {
                 $failRules++
-                $inSuccess = $false
-                $failDetails += "INBOUND: $($resIn.Output)"
+                $diag = Format-HumanFirewallError -RawOutput $resIn.Output -ExitCode $resIn.ExitCode -ExePath $exePath -Direction "INBOUND" -RuleName $inRuleName
+                $null = $diagnostics.Add($diag)
                 Write-Host "          [-] INBOUND  : " -ForegroundColor DarkGray -NoNewline
-                Write-Host "[FAIL] netsh error" -ForegroundColor Red
-                Write-Host "              Detail : $($resIn.Output)" -ForegroundColor Yellow
+                Write-Host "[FAIL]" -ForegroundColor Red
+                Write-Host "              Where  : $($diag.Location)" -ForegroundColor Yellow
+                Write-Host "              Reason : $($diag.RootCause)" -ForegroundColor Red
+                Write-Host "              Fix    : $($diag.ActionableFix)" -ForegroundColor DarkYellow
             }
         }
 
         # Outbound Rule
         if ($Mode -eq "Both" -or $Mode -eq "OutboundOnly") {
-            # Delete old/duplicate rule first
             $null = Invoke-Netsh -Arguments "advfirewall firewall delete rule name=`"$outRuleName`""
             $null = Invoke-Netsh -Arguments "advfirewall firewall delete rule name=`"[FolderBlock-OUT] $exeName`" program=`"$exePath`""
 
@@ -532,20 +669,18 @@ function Invoke-BlockOperation {
             if ($resOut.Success) {
                 $successRules++
                 Write-Host "          [+] OUTBOUND : " -ForegroundColor DarkGray -NoNewline
-                Write-Host "[OK] Rule Created" -ForegroundColor Green -NoNewline
+                Write-Host "[OK] Blocked" -ForegroundColor Green -NoNewline
                 Write-Host " ('$outRuleName')" -ForegroundColor DarkCyan
             } else {
                 $failRules++
-                $outSuccess = $false
-                $failDetails += "OUTBOUND: $($resOut.Output)"
+                $diag = Format-HumanFirewallError -RawOutput $resOut.Output -ExitCode $resOut.ExitCode -ExePath $exePath -Direction "OUTBOUND" -RuleName $outRuleName
+                $null = $diagnostics.Add($diag)
                 Write-Host "          [-] OUTBOUND : " -ForegroundColor DarkGray -NoNewline
-                Write-Host "[FAIL] netsh error" -ForegroundColor Red
-                Write-Host "              Detail : $($resOut.Output)" -ForegroundColor Yellow
+                Write-Host "[FAIL]" -ForegroundColor Red
+                Write-Host "              Where  : $($diag.Location)" -ForegroundColor Yellow
+                Write-Host "              Reason : $($diag.RootCause)" -ForegroundColor Red
+                Write-Host "              Fix    : $($diag.ActionableFix)" -ForegroundColor DarkYellow
             }
-        }
-
-        if (-not $inSuccess -or -not $outSuccess) {
-            $null = $failedExes.Add(@{ Name = $exeName; Path = $exePath; Errors = $failDetails })
         }
     }
 
@@ -567,15 +702,15 @@ function Invoke-BlockOperation {
     }
     Write-Host ("  Elapsed Time          : {0:N2} seconds" -f $duration.TotalSeconds) -ForegroundColor DarkCyan
 
-    if ($failedExes.Count -gt 0) {
+    if ($diagnostics.Count -gt 0) {
         Write-Host "  --------------------------------------------------------------------------" -ForegroundColor Red
-        Write-Host "  [!] ATTENTION: The following $($failedExes.Count) executable(s) encountered errors:" -ForegroundColor Red
-        foreach ($f in $failedExes) {
-            Write-Host "  * $($f.Name)" -ForegroundColor Yellow
-            Write-Host "    Path   : $($f.Path)" -ForegroundColor DarkGray
-            foreach ($err in $f.Errors) {
-                Write-Host "    Reason : $err" -ForegroundColor Red
-            }
+        Write-Host "  [!] DIAGNOSTIC FAILURE BREAKDOWN ($($diagnostics.Count) issue(s) detected):" -ForegroundColor Red
+        foreach ($d in $diagnostics) {
+            Write-Host "  * Rule     : $($d.RuleName)" -ForegroundColor Yellow
+            Write-Host "    Path     : $($d.ExePath)" -ForegroundColor DarkGray
+            Write-Host "    Location : $($d.Location)" -ForegroundColor Cyan
+            Write-Host "    Cause    : $($d.RootCause)" -ForegroundColor Red
+            Write-Host "    Solution : $($d.ActionableFix)" -ForegroundColor Green
         }
         Write-Host "  --------------------------------------------------------------------------" -ForegroundColor Red
     }
@@ -588,6 +723,11 @@ function Invoke-BlockOperation {
 
 function Invoke-UnblockOperation {
     param([string]$Dir)
+
+    if ([string]::IsNullOrEmpty($Dir)) {
+        if (-not (Select-DirectoryIfEmpty)) { return }
+        $Dir = $Script:CurrentTarget
+    }
 
     if (Test-IsProtectedSystemPath -PathToCheck $Dir) {
         Write-Host ""
@@ -631,7 +771,7 @@ function Invoke-UnblockOperation {
         $inRuleName = Get-RuleName -Direction "IN" -ExeName $exeName -FullPath $exePath
         $outRuleName = Get-RuleName -Direction "OUT" -ExeName $exeName -FullPath $exePath
 
-        Write-Host ("  [{0,3}/{1,-3}] Cleaning: {2}" -f $processedCount, $exes.Count, $exeName) -ForegroundColor White
+        Write-Host ("  [{0,3}/{1,-3}] Unblocking: {2}" -f $processedCount, $exes.Count, $exeName) -ForegroundColor White
 
         # Delete new hash format rules
         $resIn = Invoke-Netsh -Arguments "advfirewall firewall delete rule name=`"$inRuleName`""
@@ -647,7 +787,7 @@ function Invoke-UnblockOperation {
         $resLegOut = Invoke-Netsh -Arguments "advfirewall firewall delete rule name=`"[FolderBlock-OUT] $exeName`" program=`"$exePath`""
         if ($resLegOut.Success -and $resLegOut.Output -notmatch "No rules match") { $deletedRules++ }
 
-        # Also purge any rule bound to this exact program path
+        # Purge rules bound to program path
         $resProg = Invoke-Netsh -Arguments "advfirewall firewall delete rule name=all program=`"$exePath`""
         if ($resProg.Success -and $resProg.Output -notmatch "No rules match") { $deletedRules++ }
     }
@@ -678,9 +818,8 @@ function Invoke-UnblockAllSystem {
     Write-Host "  ==========================================================================" -ForegroundColor Yellow
     Write-Host "  GLOBAL PURGE: Scan & Clean All FirewallBlocker Rules Across System       " -ForegroundColor White
     Write-Host "  ==========================================================================" -ForegroundColor Yellow
-    Write-Host "  Scanning Windows Firewall for rules created by this tool..." -ForegroundColor Cyan
+    Write-Host "  Scanning Windows Defender Firewall for rules created by this tool..." -ForegroundColor Cyan
 
-    # Query all rules from netsh
     $allRules = Invoke-Netsh -Arguments "advfirewall firewall show rule name=all"
     if (-not $allRules.Success) {
         Write-Host "  [FAIL] Could not query firewall rules: $($allRules.Output)" -ForegroundColor Red
@@ -688,7 +827,6 @@ function Invoke-UnblockAllSystem {
         return
     }
 
-    # Match rule names starting with [FWB- or [FolderBlock- regardless of console language
     $matchedRuleNames = New-Object System.Collections.ArrayList
     $lines = $allRules.Output -split "`r?`n"
     foreach ($line in $lines) {
@@ -731,12 +869,17 @@ function Invoke-UnblockAllSystem {
         if ($res.Success) { $deleted++ }
     }
 
-    Write-Host "  [OK] Successfully removed $deleted rule(s) from Windows Firewall." -ForegroundColor Green
+    Write-Host "  [OK] Successfully removed $deleted rule(s) from Windows Defender Firewall." -ForegroundColor Green
     if (-not $NonInteractive) { Read-Host "`n  Press ENTER to return to menu..." }
 }
 
 function Invoke-ScanAudit {
     param([string]$Dir)
+
+    if ([string]::IsNullOrEmpty($Dir)) {
+        if (-not (Select-DirectoryIfEmpty)) { return }
+        $Dir = $Script:CurrentTarget
+    }
 
     Write-Host ""
     Write-Host "  --------------------------------------------------------------------------" -ForegroundColor Cyan
@@ -768,7 +911,6 @@ function Invoke-ScanAudit {
         Write-Host ("  [{0,3}/{1,-3}] {2} ({3:N1} MB)" -f $count, $exes.Count, $exe.Name, $sizeMB) -ForegroundColor White
         Write-Host "          Path: $($exe.FullName)" -ForegroundColor DarkGray
 
-        # Status indicators
         if ($status.InBlocked -and $status.OutBlocked) {
             $blockedBoth++
             Write-Host "          Status: " -ForegroundColor DarkGray -NoNewline
@@ -810,13 +952,12 @@ function Set-NewTargetDirectory {
     Write-Host "  CHANGE TARGET DIRECTORY" -ForegroundColor White
     Write-Host "  --------------------------------------------------------------------------" -ForegroundColor Cyan
     Write-Host "  Tip: You can drag and drop any folder directly into this console window!" -ForegroundColor DarkCyan
-    Write-Host "  Current: $Script:CurrentTarget" -ForegroundColor Yellow
+    Write-Host "  Current: $(if ([string]::IsNullOrEmpty($Script:CurrentTarget)) { '[NOT SET]' } else { $Script:CurrentTarget })" -ForegroundColor Yellow
     Write-Host ""
     $inputPath = Read-Host "  Enter new folder path (or press ENTER to keep current)"
     
     if ([string]::IsNullOrEmpty($inputPath)) { return }
 
-    # Clean leading and trailing quotes if pasted
     $cleaned = $inputPath.Trim('"', "'", ' ')
     
     if (-not (Test-Path -LiteralPath $cleaned)) {
@@ -825,8 +966,16 @@ function Set-NewTargetDirectory {
         return
     }
 
+    if (Test-IsProtectedSystemPath -PathToCheck $cleaned) {
+        Write-Host "  [!] WARNING: '$cleaned' is a protected Windows system path." -ForegroundColor Red
+        Write-Host "      Blocking system paths will break Windows networking. Please choose a game or app folder." -ForegroundColor Yellow
+        Start-Sleep -Seconds 3
+        return
+    }
+
     try {
         $Script:CurrentTarget = (Get-Item -LiteralPath $cleaned).FullName
+        $Script:CachedExeCount = -1
         Write-Host "  [OK] Target folder updated successfully." -ForegroundColor Green
         Start-Sleep -Seconds 1
     } catch {
@@ -846,7 +995,7 @@ function Show-FirewallMMC {
 }
 
 # ------------------------------------------------------------------------------
-# 6. Main Interactive Menu & CLI Dispatcher
+# 8. Main Interactive Menu & CLI Dispatcher
 # ------------------------------------------------------------------------------
 $Script:CurrentTarget = $TargetDir
 
@@ -892,8 +1041,8 @@ while ($true) {
     Write-Host "- Pick or drag-and-drop a new folder" -ForegroundColor DarkGray
     Write-Host "   [8]  OPEN Windows Firewall GUI (wf.msc)     " -ForegroundColor White -NoNewline
     Write-Host "- Inspect native firewall rules" -ForegroundColor DarkGray
-    Write-Host "   [9]  RESTART Windows Firewall Service       " -ForegroundColor White -NoNewline
-    Write-Host "- Check & ensure MpsSvc health" -ForegroundColor DarkGray
+    Write-Host "   [9]  RESTART / REPAIR Firewall Service      " -ForegroundColor White -NoNewline
+    Write-Host "- Auto-configure & ensure MpsSvc health" -ForegroundColor DarkGray
     Write-Host ""
     Write-Host "   [0]  Exit" -ForegroundColor Red
     Write-Host "==============================================================================" -ForegroundColor Cyan
@@ -910,7 +1059,7 @@ while ($true) {
         "7" { Set-NewTargetDirectory }
         "8" { Show-FirewallMMC }
         "9" { 
-            Write-Host "  [*] Verifying Windows Firewall Service (MpsSvc)..." -ForegroundColor Cyan
+            Write-Host "  [*] Verifying & repairing Windows Defender Firewall Service (MpsSvc)..." -ForegroundColor Cyan
             $svcRes = Ensure-FirewallServiceRunning
             if ($svcRes) { Write-Host "  [OK] Service is active and ready." -ForegroundColor Green }
             Start-Sleep -Seconds 2

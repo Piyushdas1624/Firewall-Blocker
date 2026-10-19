@@ -1,13 +1,13 @@
 # 🔥 FirewallBlocker — Universal Windows Firewall Folder Blocker
 
-[![Platform](https://img.shields.io/badge/Platform-Windows%207%20%7C%208%20%7C%208.1%20%7C%2010%20%7C%2011-blue?logo=windows)](https://github.com/Piyushdas1624/Firewall_bat)
+[![Platform](https://img.shields.io/badge/Platform-Windows%207%20SP1%20%7C%208%20%7C%208.1%20%7C%2010%20%7C%2011-blue?logo=windows)](https://github.com/Piyushdas1624/Firewall_bat)
 [![PowerShell](https://img.shields.io/badge/PowerShell-2.0%20to%207.x%2B-blue?logo=powershell)](https://github.com/Piyushdas1624/Firewall_bat)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Status](https://img.shields.io/badge/Status-Production%20Ready-success)](#)
 
 A high-performance, robust, and universal tool to recursively block and unblock all executable files (`.exe`) in any target folder using native **Windows Defender Firewall** (`netsh advfirewall`). 
 
-Engineered for **Windows 7 through Windows 11** and **Windows Server (2008 R2 – 2025)** with zero external dependencies, human-readable color-coded diagnostics, dry-run auditing, system directory safety guards, and one-liner web execution.
+Engineered for **Windows 7 SP1 through Windows 11** and **Windows Server (2008 R2 – 2025)** with zero external dependencies, human-readable color-coded diagnostics with failure localization, dry-run auditing, system directory safety guards, FIPS-compliant SHA256 hashing, and MAS-style web one-liner execution.
 
 ---
 
@@ -27,7 +27,7 @@ Bypasses DNS poisoning, ISP interception, or regional blocking:
 iex (curl.exe -s --doh-url https://1.1.1.1/dns-query https://raw.githubusercontent.com/Piyushdas1624/Firewall_bat/main/run.ps1 | Out-String)
 ```
 
-### 3. Windows 7 / Legacy PowerShell 2.0 / .NET 3.5
+### 3. Windows 7 SP1 / Legacy PowerShell 2.0 / .NET 3.5
 Works out-of-the-box on older Windows 7 SP1 machines with TLS 1.2 auto-negotiation:
 ```powershell
 powershell -nop -ep bypass -c "[Net.ServicePointManager]::SecurityProtocol=3072; iex ((New-Object Net.WebClient).DownloadString('https://raw.githubusercontent.com/Piyushdas1624/Firewall_bat/main/run.ps1'))"
@@ -59,7 +59,7 @@ If you cloned or downloaded the repository:
 ```text
 ==============================================================================
          FIREWALL BLOCKER - RECURSIVE WINDOWS FIREWALL MANAGER                
-       Windows 7 / 8 / 8.1 / 10 / 11 | Production Grade | Version 2.0        
+       Windows 7 / 8 / 8.1 / 10 / 11 | Production Grade | Version 2.1        
 ==============================================================================
   Target Root Folder : D:\Games\ActionRPG
   Discovered .EXEs   : 14 executable(s) found
@@ -79,7 +79,7 @@ If you cloned or downloaded the repository:
   CONFIGURATION & TOOLS:
    [7]  CHANGE target directory                - Pick or drag-and-drop a new folder
    [8]  OPEN Windows Firewall GUI (wf.msc)     - Inspect native firewall rules
-   [9]  RESTART Windows Firewall Service       - Check & ensure MpsSvc health
+   [9]  RESTART / REPAIR Firewall Service      - Auto-configure & ensure MpsSvc health
 
    [0]  Exit
 ==============================================================================
@@ -91,15 +91,17 @@ If you cloned or downloaded the repository:
 
 | Feature | Description |
 | :--- | :--- |
-| **Broad Compatibility** | Native support for Windows 7 SP1, 8, 8.1, 10, 11 and Windows Server (2008 R2–2025). |
+| **Broad OS Support** | Native support for Windows 7 SP1, 8, 8.1, 10, 11 and Windows Server (2008 R2–2025). |
 | **PowerShell 2.0 to 7.x+** | Strict syntax compatibility across legacy PowerShell 2.0 (Win 7 default) through PowerShell 7.4+. |
-| **Human-Readable Diagnostics** | Full color-coded output highlighting exact reasons for any `netsh` failure with actionable fixes. |
-| **Deterministic Rule Naming** | Generates unique 8-character path hashes (e.g. `[FWB-IN] game.exe (7A4B1C2D)`) preventing rule collisions across different subdirectories with identical executable names. |
+| **Human-Readable Diagnostics** | Color-coded failure localization detailing Subsystem (`Where`), Error Code (`Which`), Root Cause (`Why`), and actionable 1-click Fixes (`How`). |
+| **FIPS-Compliant Rule Naming** | Generates unique 8-character path hashes using FIPS-compliant SHA256 (e.g. `[FWB-IN] game.exe (7A4B1C2D)`), preventing collisions across identical executable names. |
 | **Critical Safety Guardrails** | Automatically protects Windows system directories (`C:\Windows`, `System32`, `SysWOW64`, root drives, Defender folder) from accidental blocking. |
-| **Firewall Health Checks** | Detects whether `MpsSvc` (Windows Defender Firewall service) is stopped or disabled, with one-click restart. |
+| **Safe Default Directory** | Avoids defaulting to `C:\Windows\System32` when launched from elevated administrator prompts, preventing accidental safety blocks or disk scan freezes. |
+| **Firewall Health & Healing** | Detects whether `MpsSvc` (Windows Defender Firewall service) is stopped or disabled, with automatic service repair and start via `sc.exe`. |
 | **Dry-Run Audit Engine** | Audit any directory to inspect which executables are currently blocked or unblocked without making changes. |
-| **Global Rule Purge** | One-click cleanup option to wipe all rules created by FirewallBlocker across the entire system. |
-| **Automated Test Suite** | Includes `tests/test_suite.ps1` covering AST parsing, special characters (`&`, `()`, `[]`, `!`), safety checks, and hash verification. |
+| **Global Rule Purge** | One-click cleanup option to scan and wipe all rules created by FirewallBlocker across the entire system. |
+| **Native Batch Fallback** | Hardened pure batch engine in `FirewallBlocker.bat` with isolated delayed expansion safe against paths containing exclamation marks (`!`). |
+| **Automated Test Suite** | 10 comprehensive tests in `tests/test_suite.ps1` verifying AST parsing, byte parity, special characters, safety guards, FIPS hash, and diagnostics. |
 
 ---
 
@@ -137,15 +139,17 @@ To run the automated test suite locally:
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\test_suite.ps1
 ```
 
-All 8 tests validate:
-1. `FirewallBlocker.ps1` AST syntax validity.
+All 10 tests validate:
+1. `FirewallBlocker.ps1` AST syntax validity (PS 2.0 to 7.x compatible).
 2. `run.ps1` AST syntax validity.
-3. Directory scanning with complex special characters (`&`, `()`, `[]`, `!`, spaces).
-4. `text.bat` & `FirewallBlocker.bat` delegation.
-5. System folder safety guardrails (`C:\Windows` block prevention).
-6. Empty directory handling.
-7. Invalid action parameter rejection.
-8. Portable hash determinism and case-insensitivity.
+3. Byte-for-byte parity between `FirewallBlocker.ps1` and `run.ps1`.
+4. Directory scanning with complex special characters (`&`, `()`, `[]`, `!`, spaces) and folder `.exe` exclusion.
+5. `text.bat` & `FirewallBlocker.bat` delegation and parameter passing.
+6. System folder safety guardrails (`C:\Windows` and `C:\Windows\System32`).
+7. Empty directory handling.
+8. Invalid action parameter rejection.
+9. FIPS-compliant SHA256 portable hash determinism and case-insensitivity.
+10. Human-readable error diagnostic analyzer accuracy.
 
 ---
 
