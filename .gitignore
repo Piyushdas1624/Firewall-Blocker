@@ -1,0 +1,6 @@
+# Temporary files
+*.tmp
+*.log
+temp_*
+tests/DummyTarget*
+tests/temp_*
