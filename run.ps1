@@ -11,10 +11,10 @@
     service health checks, and human-readable, color-coded logging.
 
     Supports remote one-liner execution:
-    - irm https://raw.githubusercontent.com/Piyushdas1624/Firewall_bat/main/run.ps1 | iex
-    - iex (curl.exe -s --doh-url https://1.1.1.1/dns-query https://raw.githubusercontent.com/Piyushdas1624/Firewall_bat/main/run.ps1 | Out-String)
+    - irm https://raw.githubusercontent.com/Piyushdas1624/Firewall-Blocker/main/run.ps1 | iex
+    - iex (curl.exe -s --doh-url https://1.1.1.1/dns-query https://raw.githubusercontent.com/Piyushdas1624/Firewall-Blocker/main/run.ps1 | Out-String)
     - Legacy Windows 7 SP1:
-      powershell -nop -ep bypass -c "[Net.ServicePointManager]::SecurityProtocol=3072; iex ((New-Object Net.WebClient).DownloadString('https://raw.githubusercontent.com/Piyushdas1624/Firewall_bat/main/run.ps1'))"
+      powershell -nop -ep bypass -c "[Net.ServicePointManager]::SecurityProtocol=3072; iex ((New-Object Net.WebClient).DownloadString('https://raw.githubusercontent.com/Piyushdas1624/Firewall-Blocker/main/run.ps1'))"
 
 .PARAMETER TargetDir
     The target directory to scan and apply firewall rules to.
@@ -302,7 +302,7 @@ function Assert-Elevated {
                 [System.IO.File]::WriteAllText($tempScript, $Script:SelfCode, [System.Text.Encoding]::UTF8)
             } else {
                 # Fallback: fetch from repository if self-code unavailable
-                $webContent = (New-Object System.Net.WebClient).DownloadString("https://raw.githubusercontent.com/Piyushdas1624/Firewall_bat/main/run.ps1")
+                $webContent = (New-Object System.Net.WebClient).DownloadString("https://raw.githubusercontent.com/Piyushdas1624/Firewall-Blocker/main/run.ps1")
                 [System.IO.File]::WriteAllText($tempScript, $webContent, [System.Text.Encoding]::UTF8)
             }
             $psiArgs = "-NoProfile -ExecutionPolicy Bypass -File `"$tempScript`"$argsToPass"

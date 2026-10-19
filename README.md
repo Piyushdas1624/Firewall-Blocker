@@ -1,3 +1,5 @@
+<!-- SEO Keywords: windows firewall folder blocker, block all exe in directory, netsh advfirewall script, recursive outbound firewall rule, powershell firewall one-liner, windows 7 windows 11 defender firewall manager, block game telemetry, offline firewall isolator, mass block exe -->
+
 <p align="center">
   <img src="https://img.shields.io/badge/🔥_FirewallBlocker-Universal_Windows_Firewall_Suite-ef4444?style=for-the-badge&labelColor=0f172a" alt="FirewallBlocker">
 </p>
@@ -8,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Piyushdas1624/Firewall_bat"><img src="https://img.shields.io/badge/GitHub-Piyushdas1624%2FFirewall__bat-181717?style=flat-square&logo=github" alt="GitHub Repository"></a>
+  <a href="https://github.com/Piyushdas1624/Firewall-Blocker"><img src="https://img.shields.io/badge/GitHub-Piyushdas1624%2FFirewall--Blocker-181717?style=flat-square&logo=github" alt="GitHub Repository"></a>
   <img src="https://img.shields.io/badge/Platform-Windows%207%20SP1%20%7C%208%20%7C%208.1%20%7C%2010%20%7C%2011%20%7C%20Server-0ea5e9?style=flat-square&logo=windows" alt="Platform">
   <img src="https://img.shields.io/badge/PowerShell-2.0%20to%207.x%2B-2563eb?style=flat-square&logo=powershell&logoColor=white" alt="PowerShell 2.0+">
   <img src="https://img.shields.io/badge/Engine-Native%20netsh%20%2B%20Batch%20Fallback-10b981?style=flat-square" alt="Native Engine">
@@ -56,25 +58,25 @@ Launch directly in PowerShell without manually cloning or extracting any files:
 ### 1. Standard PowerShell (Windows 8 / 10 / 11)
 Open PowerShell (Standard User or Administrator) and run:
 ```powershell
-irm https://raw.githubusercontent.com/Piyushdas1624/Firewall_bat/main/run.ps1 | iex
+irm https://raw.githubusercontent.com/Piyushdas1624/Firewall-Blocker/main/run.ps1 | iex
 ```
 
 ### 2. Cloudflare 1.1.1.1 DNS-over-HTTPS (DoH)
 Bypasses ISP DNS interception or regional censorship:
 ```powershell
-iex (curl.exe -s --doh-url https://1.1.1.1/dns-query https://raw.githubusercontent.com/Piyushdas1624/Firewall_bat/main/run.ps1 | Out-String)
+iex (curl.exe -s --doh-url https://1.1.1.1/dns-query https://raw.githubusercontent.com/Piyushdas1624/Firewall-Blocker/main/run.ps1 | Out-String)
 ```
 
 ### 3. Windows 7 SP1 / Legacy PowerShell 2.0 / .NET 3.5
 Works cleanly on vanilla Windows 7 SP1 machines with automated TLS 1.2 negotiation:
 ```powershell
-powershell -nop -ep bypass -c "[Net.ServicePointManager]::SecurityProtocol=3072; iex ((New-Object Net.WebClient).DownloadString('https://raw.githubusercontent.com/Piyushdas1624/Firewall_bat/main/run.ps1'))"
+powershell -nop -ep bypass -c "[Net.ServicePointManager]::SecurityProtocol=3072; iex ((New-Object Net.WebClient).DownloadString('https://raw.githubusercontent.com/Piyushdas1624/Firewall-Blocker/main/run.ps1'))"
 ```
 
 ### 4. Command Prompt (`cmd.exe`)
 Paste directly into an ordinary Command Prompt window:
 ```cmd
-powershell -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol=3072; iex (irm 'https://raw.githubusercontent.com/Piyushdas1624/Firewall_bat/main/run.ps1')"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol=3072; iex (irm 'https://raw.githubusercontent.com/Piyushdas1624/Firewall-Blocker/main/run.ps1')"
 ```
 
 ---
