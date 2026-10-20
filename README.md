@@ -11,6 +11,8 @@
 
 <p align="center">
   <a href="https://github.com/Piyushdas1624/Firewall-Blocker"><img src="https://img.shields.io/badge/GitHub-Piyushdas1624%2FFirewall--Blocker-181717?style=flat-square&logo=github" alt="GitHub Repository"></a>
+  <img src="https://img.shields.io/badge/Version-2.3-ef4444?style=flat-square" alt="Version 2.3">
+  <img src="https://img.shields.io/badge/Tests-19%2F19%20Passing-10b981?style=flat-square" alt="Tests">
   <img src="https://img.shields.io/badge/Platform-Windows%207%20SP1%20%7C%208%20%7C%208.1%20%7C%2010%20%7C%2011%20%7C%20Server-0ea5e9?style=flat-square&logo=windows" alt="Platform">
   <img src="https://img.shields.io/badge/PowerShell-2.0%20to%207.x%2B-2563eb?style=flat-square&logo=powershell&logoColor=white" alt="PowerShell 2.0+">
   <img src="https://img.shields.io/badge/Engine-Native%20netsh%20%2B%20Batch%20Fallback-10b981?style=flat-square" alt="Native Engine">
@@ -99,7 +101,7 @@ If you prefer to clone or download the repository locally:
 ```text
 ==============================================================================
          FIREWALL BLOCKER - RECURSIVE WINDOWS FIREWALL MANAGER                
-       Windows 7 / 8 / 8.1 / 10 / 11 | Production Grade | Version 2.1        
+       Windows 7 / 8 / 8.1 / 10 / 11 | Production Grade | Version 2.3        
 ==============================================================================
   Target Root Folder : D:\Games\ActionRPG
   Discovered .EXEs   : 14 executable(s) found
@@ -132,14 +134,17 @@ If you prefer to clone or download the repository locally:
 - ⚡ **1-Click Recursive Folder Blocking**: Automatically discovers all `.exe` files in any nested folder structure and applies Inbound, Outbound, or bidirectional firewall block rules.
 - 🌐 **Universal Windows Spectrum**: Compatible with Windows 7 SP1, 8, 8.1, 10, 11, and Windows Server (2008 R2–2025) across PowerShell 2.0 through PowerShell 7.4+.
 - 🔍 **Human-Readable Diagnostics & Failure Localization**: Replaces cryptic `netsh` error dumps with a color-coded diagnostic analyzer pinpointing Subsystem (`Where`), Component (`Which`), Root Cause (`Why`), and actionable 1-click Fixes (`How`).
-- 🛑 **Critical Safety Guardrails**: Prevents catastrophic user accidents by automatically refusing to target `C:\Windows`, `System32`, `SysWOW64`, root drives (`C:\`), or `Windows Defender` folders (`ExitCode 2`).
+- 🛑 **Critical Safety Guardrails**: Prevents catastrophic accidents by automatically refusing to target `C:\Windows`, `System32`, `SysWOW64`, root drives (`C:\`), `Microsoft\WindowsApps`, or `Windows Defender` folders (`ExitCode 2`), with full 32-bit Windows compatibility.
+- 🛡️ **User Profile & Large Folder Safeguards**: Prompts for confirmation when targeting user profile roots (`C:\Users\<user>`) or folders containing > 100 executables; enforces `-Force` in automated headless mode.
 - 🔒 **FIPS-Compliant Deterministic Hashing**: Rule identifiers use FIPS-approved SHA256 path hashes (e.g. `[FWB-IN] app.exe (7A4B1C2D)`), eliminating rule collisions across duplicate executable names.
-- 🛡️ **Safe Default Working Directory**: Avoids accidentally targeting `C:\Windows\System32` when invoked from an elevated admin command prompt or web one-liner.
+- ⚡ **Race-Free Async Stream Reading**: Dual-stream asynchronous output handling with strict thread draining eliminates deadlock and truncated command output in `netsh` executions.
+- 🛡️ **Safe Default Working Directory & UAC Elevation**: Elevation generates unique, fully validated GUID scripts and preserves target directories; never defaults to or pollutes `%TEMP%`.
 - 📁 **False-Positive Directory Filtering**: Folders ending with `.exe` (e.g. `Game.exe/`) are strictly filtered out using `-not $_.PSIsContainer`.
 - 🏥 **Firewall Service Healing**: Detects if `MpsSvc` (Windows Defender Firewall) is stopped or disabled, providing automatic service configuration and startup via `sc.exe`.
-- 🧪 **Dry-Run Audit Mode**: Inspects the firewall status of all executables in a directory without altering rules.
+- 🧪 **Dry-Run Audit Mode**: Inspects the firewall status of all executables in a directory without altering rules across multilingual Windows installations.
 - 🧹 **Global Rule Purge**: 1-click cleanup to find and wipe all rules created by FirewallBlocker across your entire machine.
-- 🖲️ **Hardened CMD Batch Fallback**: Includes a standalone CMD batch engine in `FirewallBlocker.bat` with isolated delayed expansion safe against paths containing exclamation marks (`!`).
+- 🖲️ **Hardened CMD Batch Fallback**: Standalone CMD batch engine in `FirewallBlocker.bat` with active AppLocker/WDAC/GPO bypass detection, preserved exit codes, and isolated delayed expansion safe against paths containing exclamation marks (`!`).
+- 🛑 **Stdin EOF / Stream Closure Guard**: Safely terminates interactive console menus when standard input reaches EOF or is piped, preventing infinite redraw loops.
 
 ---
 
@@ -194,26 +199,36 @@ powershell -ExecutionPolicy Bypass -File .\FirewallBlocker.ps1 -TargetDir "D:\My
 
 ## 🧪 Verification & Automated Testing
 
-FirewallBlocker includes an automated 10-point test suite in `tests/test_suite.ps1`. To run it locally:
+FirewallBlocker includes an automated 19-point test suite in `tests/test_suite.ps1`. To run it locally:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\test_suite.ps1
 ```
 
-All 10 tests validate:
+All 19 tests validate:
 1. `FirewallBlocker.ps1` AST syntax validity (PS 2.0 to 7.x compatible).
 2. `run.ps1` AST syntax validity.
 3. Byte-for-byte parity between `FirewallBlocker.ps1` and `run.ps1`.
 4. Directory scanning with complex special characters (`&`, `()`, `[]`, `!`, spaces) and folder `.exe` exclusion.
 5. `text.bat` & `FirewallBlocker.bat` delegation and parameter passing.
-6. System folder safety guardrails (`C:\Windows` and `C:\Windows\System32` rejected with `ExitCode 2`).
+6. System folder safety guardrails (`C:\Windows`, `System32`, `Program Files`, `Windows Defender` rejected with `ExitCode 2`).
 7. Empty directory handling.
 8. Invalid action parameter rejection.
 9. FIPS-compliant SHA256 portable hash determinism and case-insensitivity.
 10. Human-readable error diagnostic analyzer accuracy.
+11. Single-element executable collection & `.Count` property preservation in PS 2.0.
+12. Batch engine integrity, variable scoping, and live SHA256 hash parity.
+13. Multilingual netsh output rule parsing across 7 international Windows locales.
+14. Action dispatching & mode normalization (`BlockOutboundOnly`, `BlockInboundOnly`).
+15. 32-bit architecture guardrails (absent `ProgramFiles(x86)`) & `Microsoft\WindowsApps` protection.
+16. User profile root (`C:\Users\<user>`) & 100+ executable safeguard confirmation.
+17. Menu loop EOF / standard input closure handling without infinite loops.
+18. `Invoke-Netsh` asynchronous stream reading & race-free output integrity.
+19. `FirewallBlocker.bat` exit code preservation from PowerShell child processes.
 
 ---
 
 ## 📄 License
 
 This project is licensed under the [MIT License](LICENSE).
+

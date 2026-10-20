@@ -70,6 +70,15 @@ try {
     }
 }
 
+function Test-IsRealScriptContent {
+    param([string]$Code)
+    if ([string]::IsNullOrEmpty($Code)) { return $false }
+    return ($Code.Length -gt 5000 -and
+            $Code.Contains("Invoke-BlockOperation") -and
+            $Code.Contains("Get-PortableHash") -and
+            $Code.Contains("Test-IsProtectedSystemPath"))
+}
+
 # Resolve running mode (File vs In-Memory IEX)
 $Script:RunningFromFile = $false
 $Script:ScriptFilePath = ""
@@ -80,11 +89,27 @@ if ($MyInvocation -and $MyInvocation.MyCommand -and $MyInvocation.MyCommand.Path
 
 # Store self-content for reliable offline elevation if running via IEX
 $Script:SelfCode = ""
-if ($MyInvocation -and $MyInvocation.MyCommand) {
-    if ($MyInvocation.MyCommand.ScriptBlock) {
-        $Script:SelfCode = $MyInvocation.MyCommand.ScriptBlock.ToString()
-    } elseif ($MyInvocation.MyCommand.Definition) {
-        $Script:SelfCode = $MyInvocation.MyCommand.Definition
+if ($Script:RunningFromFile) {
+    try {
+        $Script:SelfCode = [System.IO.File]::ReadAllText($Script:ScriptFilePath, [System.Text.Encoding]::UTF8)
+    } catch {}
+}
+if (-not (Test-IsRealScriptContent -Code $Script:SelfCode)) {
+    if ($MyInvocation -and $MyInvocation.MyCommand) {
+        $candidateCode = ""
+        if ($MyInvocation.MyCommand.ScriptBlock) {
+            $candidateCode = $MyInvocation.MyCommand.ScriptBlock.ToString()
+        } elseif ($MyInvocation.MyCommand.Definition) {
+            $candidateCode = $MyInvocation.MyCommand.Definition
+        }
+        if (Test-IsRealScriptContent -Code $candidateCode) {
+            $Script:SelfCode = $candidateCode
+        }
+    }
+}
+if (-not (Test-IsRealScriptContent -Code $Script:SelfCode)) {
+    if (-not [string]::IsNullOrEmpty($global:FirewallBlocker_ScriptCode) -and (Test-IsRealScriptContent -Code $global:FirewallBlocker_ScriptCode)) {
+        $Script:SelfCode = $global:FirewallBlocker_ScriptCode
     }
 }
 
@@ -94,6 +119,11 @@ function Cleanup-TempElevationScript {
             Remove-Item -LiteralPath $Script:ScriptFilePath -Force -ErrorAction SilentlyContinue
         } catch {}
     }
+    try {
+        if (-not [string]::IsNullOrEmpty($env:TEMP) -and (Test-Path -LiteralPath $env:TEMP)) {
+            Get-ChildItem -LiteralPath $env:TEMP -Filter "*FirewallBlocker_Elevated*.ps1" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+        }
+    } catch {}
 }
 try {
     $null = Register-EngineEvent -SourceIdentifier ([System.Management.Automation.PsEngineEvent]::Exiting) -Action { Cleanup-TempElevationScript } -SupportEvent
@@ -146,6 +176,7 @@ function Test-IsProtectedSystemPath {
     }
 
     # 3. Reject root Program Files and Program Files (x86) folders directly (subdirectories like C:\Program Files\Game ARE allowed)
+    $cleanProg = $null
     $progFiles = $env:ProgramFiles
     if (-not [string]::IsNullOrEmpty($progFiles)) {
         $cleanProg = $progFiles.TrimEnd('\', '/')
@@ -153,6 +184,7 @@ function Test-IsProtectedSystemPath {
             return $true
         }
     }
+    $cleanProgX86 = $null
     $progFilesX86 = ${env:ProgramFiles(x86)}
     if (-not [string]::IsNullOrEmpty($progFilesX86)) {
         $cleanProgX86 = $progFilesX86.TrimEnd('\', '/')
@@ -171,14 +203,25 @@ function Test-IsProtectedSystemPath {
         return $true
     }
 
-    # 5. Reject Windows Defender and Microsoft Security folders (and all subdirectories) across ProgramFiles, ProgramFiles(x86), ProgramData
-    $defenderFolders = @(
-        (Join-Path $cleanProg "Windows Defender"),
-        (Join-Path $cleanProg "Windows Defender Advanced Threat Protection"),
-        (Join-Path $cleanProgX86 "Windows Defender"),
-        (Join-Path $cleanProgData "Microsoft\Windows Defender"),
-        (Join-Path $cleanProgData "Microsoft\Windows Defender Advanced Threat Protection")
-    )
+    # 5. Reject Windows Defender, Microsoft Security, and WindowsApps folders (and all subdirectories)
+    $defenderFolders = New-Object System.Collections.ArrayList
+    if (-not [string]::IsNullOrEmpty($cleanProg)) {
+        $null = $defenderFolders.Add((Join-Path $cleanProg "Windows Defender"))
+        $null = $defenderFolders.Add((Join-Path $cleanProg "Windows Defender Advanced Threat Protection"))
+    }
+    if (-not [string]::IsNullOrEmpty($cleanProgX86)) {
+        $null = $defenderFolders.Add((Join-Path $cleanProgX86 "Windows Defender"))
+    }
+    if (-not [string]::IsNullOrEmpty($cleanProgData)) {
+        $null = $defenderFolders.Add((Join-Path $cleanProgData "Microsoft\Windows Defender"))
+        $null = $defenderFolders.Add((Join-Path $cleanProgData "Microsoft\Windows Defender Advanced Threat Protection"))
+    }
+    $localAppData = $env:LOCALAPPDATA
+    if (-not [string]::IsNullOrEmpty($localAppData)) {
+        $cleanLocalAppData = $localAppData.TrimEnd('\', '/')
+        $null = $defenderFolders.Add((Join-Path $cleanLocalAppData "Microsoft\WindowsApps"))
+    }
+
     foreach ($df in $defenderFolders) {
         if (-not [string]::IsNullOrEmpty($df)) {
             $cleanDf = $df.TrimEnd('\', '/')
@@ -192,12 +235,71 @@ function Test-IsProtectedSystemPath {
     return $false
 }
 
+function Test-IsUserProfileRoot {
+    param([string]$PathToCheck)
+    if ([string]::IsNullOrEmpty($PathToCheck)) { return $false }
+    try {
+        $resolved = [System.IO.Path]::GetFullPath($PathToCheck).TrimEnd('\', '/')
+    } catch {
+        return $false
+    }
+
+    $userProfile = $env:USERPROFILE
+    if (-not [string]::IsNullOrEmpty($userProfile)) {
+        $cleanUP = $userProfile.TrimEnd('\', '/')
+        if ($resolved.Equals($cleanUP, [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $true
+        }
+    }
+
+    $sysDrive = $env:SystemDrive
+    if ([string]::IsNullOrEmpty($sysDrive)) { $sysDrive = "C:" }
+    $usersDir = Join-Path ($sysDrive.TrimEnd('\') + "\") "Users"
+    $cleanUsers = $usersDir.TrimEnd('\', '/')
+    if ($resolved.Equals($cleanUsers, [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $true
+    }
+
+    $publicDir = $env:PUBLIC
+    if (-not [string]::IsNullOrEmpty($publicDir)) {
+        $cleanPublic = $publicDir.TrimEnd('\', '/')
+        if ($resolved.Equals($cleanPublic, [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $true
+        }
+    }
+
+    # Direct child of C:\Users (e.g. C:\Users\Username)
+    try {
+        $parent = [System.IO.Path]::GetDirectoryName($resolved)
+        if (-not [string]::IsNullOrEmpty($parent)) {
+            $cleanParent = $parent.TrimEnd('\', '/')
+            if ($cleanParent.Equals($cleanUsers, [System.StringComparison]::OrdinalIgnoreCase)) {
+                return $true
+            }
+        }
+    } catch {}
+
+    return $false
+}
+
 # Target directory initialization logic
-# Prevent accidental targeting of Windows\System32 when running from elevated console or web one-liner!
+# Prevent accidental targeting of Windows\System32 or Temp folder when running from elevated console or web one-liner!
+$isTempElevated = ($Script:RunningFromFile -and ($Script:ScriptFilePath -like "*FirewallBlocker_Elevated*"))
+$isTempDir = $false
+try {
+    if (-not [string]::IsNullOrEmpty($env:TEMP)) {
+        $tempRoot = [System.IO.Path]::GetFullPath($env:TEMP).TrimEnd('\', '/')
+        $currentScriptDir = if ($Script:RunningFromFile) { (Split-Path -Parent $Script:ScriptFilePath).TrimEnd('\', '/') } else { "" }
+        if (-not [string]::IsNullOrEmpty($currentScriptDir) -and $currentScriptDir.Equals($tempRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+            $isTempDir = $true
+        }
+    }
+} catch {}
+
 if ([string]::IsNullOrEmpty($TargetDir)) {
     if (-not [string]::IsNullOrEmpty($InitialDir) -and (Test-Path -LiteralPath $InitialDir) -and (-not (Test-IsProtectedSystemPath -PathToCheck $InitialDir))) {
         $TargetDir = $InitialDir
-    } elseif ($Script:RunningFromFile) {
+    } elseif ($Script:RunningFromFile -and -not $isTempElevated -and -not $isTempDir) {
         $scriptParent = Split-Path -Parent $Script:ScriptFilePath
         if (-not (Test-IsProtectedSystemPath -PathToCheck $scriptParent)) {
             $TargetDir = $scriptParent
@@ -206,7 +308,7 @@ if ([string]::IsNullOrEmpty($TargetDir)) {
         }
     } else {
         $cwd = (Get-Location).Path
-        if (-not (Test-IsProtectedSystemPath -PathToCheck $cwd)) {
+        if (-not (Test-IsProtectedSystemPath -PathToCheck $cwd) -and -not $isTempDir) {
             $TargetDir = $cwd
         } else {
             $TargetDir = ""
@@ -245,7 +347,7 @@ function Write-Banner {
     Clear-Host
     Write-Host "==============================================================================" -ForegroundColor Cyan
     Write-Host "         FIREWALL BLOCKER - RECURSIVE WINDOWS FIREWALL MANAGER                " -ForegroundColor White
-    Write-Host "       Windows 7 / 8 / 8.1 / 10 / 11 | Production Grade | Version 2.2        " -ForegroundColor DarkCyan
+    Write-Host "       Windows 7 / 8 / 8.1 / 10 / 11 | Production Grade | Version 2.3        " -ForegroundColor DarkCyan
     Write-Host "==============================================================================" -ForegroundColor Cyan
 }
 
@@ -369,19 +471,37 @@ function Assert-Elevated {
             return $false
         }
     } else {
-        # Running in-memory (e.g. irm | iex). Write self script content to temp file.
+        # Running in-memory (e.g. irm | iex). Write self script content to a unique temp file.
         try {
-            Get-ChildItem -Path $env:TEMP -Filter "FirewallBlocker_Elevated*.ps1" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+            Get-ChildItem -Path $env:TEMP -Filter "*FirewallBlocker_Elevated*.ps1" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
         } catch {}
-        $tempScript = Join-Path $env:TEMP "FirewallBlocker_Elevated.ps1"
+        $tempGuid = [System.Guid]::NewGuid().ToString("N").Substring(0, 8)
+        $tempScript = Join-Path $env:TEMP "FirewallBlocker_Elevated_$tempGuid.ps1"
         try {
-            if (-not [string]::IsNullOrEmpty($Script:SelfCode)) {
-                [System.IO.File]::WriteAllText($tempScript, $Script:SelfCode, [System.Text.Encoding]::UTF8)
-            } else {
+            $scriptPayload = $Script:SelfCode
+            if (-not (Test-IsRealScriptContent -Code $scriptPayload)) {
                 # Fallback: fetch from repository if self-code unavailable
-                $webContent = (New-Object System.Net.WebClient).DownloadString("https://raw.githubusercontent.com/Piyushdas1624/Firewall-Blocker/main/run.ps1")
-                [System.IO.File]::WriteAllText($tempScript, $webContent, [System.Text.Encoding]::UTF8)
+                try {
+                    [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor [System.Net.SecurityProtocolType]3072
+                } catch {}
+                try {
+                    $wc = New-Object System.Net.WebClient
+                    $webContent = $wc.DownloadString("https://raw.githubusercontent.com/Piyushdas1624/Firewall-Blocker/main/run.ps1")
+                    if (Test-IsRealScriptContent -Code $webContent) {
+                        $scriptPayload = $webContent
+                        $Script:SelfCode = $webContent
+                    }
+                } catch {}
             }
+
+            if (-not (Test-IsRealScriptContent -Code $scriptPayload)) {
+                Write-Host "  [FAIL] Could not elevate: Full script content is unavailable in memory." -ForegroundColor Red
+                Write-Host "         Please save FirewallBlocker.ps1 locally or run from an elevated PowerShell console." -ForegroundColor Yellow
+                if ($IsNonInteractive) { Cleanup-TempElevationScript; exit 1 }
+                return $false
+            }
+
+            [System.IO.File]::WriteAllText($tempScript, $scriptPayload, [System.Text.Encoding]::UTF8)
             $psiArgs = "-NoProfile -ExecutionPolicy Bypass -File `"$tempScript`"$argsToPass"
             if ($IsNonInteractive) {
                 $elevProc = Start-Process -FilePath "powershell.exe" -ArgumentList $psiArgs -Verb RunAs -Wait -PassThru
@@ -527,15 +647,34 @@ function Invoke-Netsh {
             if (-not $proc.WaitForExit(15000)) {
                 try { $proc.Kill() } catch {}
             }
-            $stdout = if ($outTask.IsCompleted) { $outTask.Result } else { "" }
-            $stderr = if ($errTask.IsCompleted) { $errTask.Result } else { "" }
+            # Drain stream tasks completely - wait up to 3000ms after process exit
+            if (-not $outTask.Wait(3000)) {
+                try { $stdout = $outTask.Result } catch { $stdout = "" }
+            } else {
+                $stdout = $outTask.Result
+            }
+            if (-not $errTask.Wait(3000)) {
+                try { $stderr = $errTask.Result } catch { $stderr = "" }
+            } else {
+                $stderr = $errTask.Result
+            }
         } else {
-            # Synchronous fallback for legacy PowerShell 2.0 / .NET 3.5
+            # Synchronous fallback for legacy PowerShell 2.0 / .NET 2.0/3.5
+            # Read stderr asynchronously via event handler to prevent pipe buffer deadlock
+            $errSb = New-Object System.Text.StringBuilder
+            $errHandler = [System.Diagnostics.DataReceivedEventHandler]{
+                param($s, $e)
+                if ($e.Data) { $null = $errSb.AppendLine($e.Data) }
+            }
+            $proc.add_ErrorDataReceived($errHandler)
+            $proc.BeginErrorReadLine()
+
             $stdout = $proc.StandardOutput.ReadToEnd()
-            $stderr = $proc.StandardError.ReadToEnd()
             if (-not $proc.WaitForExit(15000)) {
                 try { $proc.Kill() } catch {}
             }
+            try { $proc.WaitForExit() } catch {}
+            $stderr = $errSb.ToString()
         }
 
         $exitCode = -1
@@ -647,14 +786,66 @@ function Test-ExecutableRuleStatus {
     $inRule = "[FWB-IN] $cleanName ($hash)"
     $outRule = "[FWB-OUT] $cleanName ($hash)"
     
+    # 1. Prefer language-neutral NetSecurity cmdlets if available (PowerShell 3.0+ / Windows 8+)
+    $hasNetSecurity = $false
+    try {
+        if (Get-Command Get-NetFirewallRule -ErrorAction SilentlyContinue) {
+            $hasNetSecurity = $true
+        }
+    } catch {}
+
+    if ($hasNetSecurity) {
+        $checkRuleCim = {
+            param([string]$ruleDisplayName, [string]$programPath)
+            try {
+                $rules = @(Get-NetFirewallRule -DisplayName $ruleDisplayName -ErrorAction SilentlyContinue)
+                if ($rules.Count -eq 0) {
+                    $rules = @(Get-NetFirewallRule -Name $ruleDisplayName -ErrorAction SilentlyContinue)
+                }
+                foreach ($r in $rules) {
+                    $isEnabled = ($r.Enabled -eq [Microsoft.PowerShell.Cmdletization.GeneratedTypes.NetSecurity.Enabled]::True -or $r.Enabled -eq "True" -or $r.Enabled -eq 1)
+                    if ($isEnabled) {
+                        $act = $r.Action.ToString()
+                        if ($act -eq "Block" -or $r.Action -eq 4 -or $r.Action -eq 2) {
+                            return $true
+                        }
+                    }
+                }
+            } catch {}
+            return $false
+        }
+
+        $inBlocked = (& $checkRuleCim $inRule $ExePath)
+        if (-not $inBlocked) {
+            $inBlocked = (& $checkRuleCim "[FWB-IN] $cleanName" $ExePath)
+        }
+        if (-not $inBlocked) {
+            $inBlocked = (& $checkRuleCim "[FolderBlock-IN] $cleanName" $ExePath)
+        }
+
+        $outBlocked = (& $checkRuleCim $outRule $ExePath)
+        if (-not $outBlocked) {
+            $outBlocked = (& $checkRuleCim "[FWB-OUT] $cleanName" $ExePath)
+        }
+        if (-not $outBlocked) {
+            $outBlocked = (& $checkRuleCim "[FolderBlock-OUT] $cleanName" $ExePath)
+        }
+
+        return @{
+            InBlocked  = $inBlocked
+            OutBlocked = $outBlocked
+        }
+    }
+
+    # 2. Netsh Fallback for Windows 7 SP1 / PS 2.0 or environments without NetSecurity
     $checkIn = Invoke-Netsh -Arguments "advfirewall firewall show rule name=`"$inRule`""
     $checkOut = Invoke-Netsh -Arguments "advfirewall firewall show rule name=`"$outRule`""
     
-    # Multilingual token matchers (EN, DE, FR, ES, IT, PT, RU, ZH-Hans, ZH-Hant, JA, KO)
-    $blockActionRegex = '(?i)(?:Action|Aktion|Acci[o\u00F3]n|Azione|A[c\u00E7][a\u00E3]o|\u0414\u0435\u0439\u0441\u0442\u0432\u0438\u0435|\u64CD\u4F5C|\u52D5\u4F5C|\uC791\uC5C5|\uB3D9\uC791)[\s:\uFF1A]+(?:Block|Bloqu|Blockier|Blocca|\u0411\u043B\u043E\u043A\u0438\u0440|\u963B\u6B62|\u5C01\u9396|\u30D6\u30ED\u30C3\u30AF|\uCC28\uB2E8)'
-    $allowActionRegex = '(?i)(?:Action|Aktion|Acci[o\u00F3]n|Azione|A[c\u00E7][a\u00E3]o|\u0414\u0435\u0439\u0441\u0442\u0432\u0438\u0435|\u64CD\u4F5C|\u52D5\u4F5C|\uC791\uC5C5|\uB3D9\uC791)[\s:\uFF1A]+(?:Allow|Zulassen|Autoris|Permit|Consenti|\u0420\u0430\u0437\u0440\u0435\u0448|\u5141\u8BB8|\u5141\u8A31|\u8A31\u53EF|\uD5C8\uC6A9)'
-    $ruleExistsRegex  = '(?i)(?:Rule Name|Regelname|Nom de r[e\u00E8\u00E9]gle|Nombre de regla|Nome regola|\u0418\u043C\u044F \u043F\u0440\u0430\u0432\u0438\u043B\u0430|\u89C4\u5219\u540D\u79F0|\u898F\u5247\u540D|\uADDC\uCE59\s*\uC774\uB984|Name)[\s:\uFF1A]+'
-    $disabledRegex    = '(?i)(?:Enabled|Aktiviert|Activ[e\u00E9]|Habilitado|Abilitato|\u0412\u043A\u043B\u044E\u0447\u0435\u043D\u043E|\u5DF2\u542F\u7528|\u5DF2\u555F\u7528|\u6709\u52B9|\uC0AC\uC6A9|\uD65C\uC131\uD654)[\s:\uFF1A]+(?:No|Nein|Non|No|\u041D\u0435\u0442|\u5426|\u3044\u3044\u3048|\uC544\uB2C8\uC694)'
+    # Multilingual token matchers (EN, DE, FR, ES, IT, PT, PL, TR, NL, RU, ZH-Hans, ZH-Hant, JA, KO)
+    $blockActionRegex = '(?i)(?:Action|Aktion|Acci[o\u00F3]n|Azione|A[c\u00E7][a\u00E3]o|Dzia[l\u0142]anie|Eylem|Actie|\u0414\u0435\u0439\u0441\u0442\u0432\u0438\u0435|\u64CD\u4F5C|\u52D5\u4F5C|\uC791\uC5C5|\uB3D9\uC791)[\s:\uFF1A]+(?:Block|Bloqu|Blockier|Blocca|Blok|Zablokuj|Engelle|Blokkeren|\u0411\u043B\u043E\u043A\u0438\u0440|\u963B\u6B62|\u5C01\u9396|\u30D6\u30ED\u30C3\u30AF|\uCC28\uB2E8)'
+    $allowActionRegex = '(?i)(?:Action|Aktion|Acci[o\u00F3]n|Azione|A[c\u00E7][a\u00E3]o|Dzia[l\u0142]anie|Eylem|Actie|\u0414\u0435\u0439\u0441\u0442\u0432\u0438\u0435|\u64CD\u4F5C|\u52D5\u4F5C|\uC791\uC5C5|\uB3D9\uC791)[\s:\uFF1A]+(?:Allow|Zulassen|Autoris|Permit|Consenti|Zezwalaj|Izin|Toestaan|\u0420\u0430\u0437\u0440\u0435\u0448|\u5141\u8BB8|\u5141\u8A31|\u8A31\u53EF|\uD5C8\uC6A9)'
+    $ruleExistsRegex  = '(?i)(?:Rule Name|Regelname|Nom de r[e\u00E8\u00E9]gle|Nombre de regla|Nome regola|Nazwa regu[l\u0142]y|Kural Ad[i\u0131]|Regelnaam|\u0418\u043C\u044F \u043F\u0440\u0430\u0432\u0438\u043B\u0430|\u89C4\u5219\u540D\u79F0|\u898F\u5247\u540D|\uADDC\uCE59\s*\uC774\uB984|Name)[\s:\uFF1A]+'
+    $disabledRegex    = '(?i)(?:Enabled|Aktiviert|Activ[e\u00E9]|Habilitado|Abilitato|W[l\u0142][a\u0105]czone|Etkin|Ingeschakeld|\u0412\u043A\u043B\u044E\u0447\u0435\u043D\u043E|\u5DF2\u542F\u7528|\u5DF2\u555F\u7528|\u6709\u52B9|\uC0AC\uC6A9|\uD65C\uC131\uD654)[\s:\uFF1A]+(?:No|Nein|Non|Nie|Hay[i\u0131]r|Nee|\u041D\u0435\u0442|\u5426|\u3044\u3044\u3048|\uC544\uB2C8\uC694|False|0)'
 
     $isRuleBlocked = {
         param($res)
@@ -663,7 +854,8 @@ function Test-ExecutableRuleStatus {
         if ($txt -match $disabledRegex) { return $false }
         if ($txt -match $blockActionRegex) { return $true }
         if ($txt -match $allowActionRegex) { return $false }
-        if ($txt -match $ruleExistsRegex) { return $true }
+        # Language-neutral existence fallback: if netsh exited 0 and rule name exists, it is a blocked rule created by this tool
+        if ($txt -match $ruleExistsRegex -or ($res.Success -and $txt.Length -gt 10)) { return $true }
         return $false
     }
 
@@ -769,6 +961,42 @@ function Invoke-BlockOperation {
         Write-Host "      Path: $Dir" -ForegroundColor DarkGray
         if (-not $NonInteractive) { Read-Host "`n  Press ENTER to return to menu..."; return $true }
         return $true
+    }
+
+    # Safeguard check for sensitive directory (User Profile root) or large batch (> 100 exes)
+    $isUserRoot = Test-IsUserProfileRoot -PathToCheck $Dir
+    $isLargeTarget = ($exes.Count -gt 100)
+
+    if ($isUserRoot -or $isLargeTarget) {
+        Write-Host ""
+        Write-Host "  ==========================================================================" -ForegroundColor Yellow
+        Write-Host "  [CONFIRMATION REQUIRED] POTENTIALLY SENSITIVE OR LARGE TARGET!             " -ForegroundColor White
+        Write-Host "  ==========================================================================" -ForegroundColor Yellow
+        if ($isUserRoot) {
+            Write-Host "  [!] WARNING: Target is a User Profile directory: $Dir" -ForegroundColor Yellow
+            Write-Host "      Blocking this folder will affect apps in AppData, Local, and Desktop." -ForegroundColor Yellow
+        }
+        if ($isLargeTarget) {
+            Write-Host "  [!] WARNING: Target contains $($exes.Count) executables (> 100)." -ForegroundColor Yellow
+        }
+        Write-Host "  ==========================================================================" -ForegroundColor Yellow
+
+        if ($NonInteractive) {
+            if (-not $Force) {
+                Write-Host "  [ABORT] Blocking a User Profile root or > 100 executables in NonInteractive mode requires -Force." -ForegroundColor Red
+                Cleanup-TempElevationScript
+                exit 1
+            }
+        } else {
+            if (-not $Force) {
+                $confirmBlock = Read-Host "  Are you SURE you want to block all $($exes.Count) executable(s) in this folder? [Y/N]"
+                if ($null -eq $confirmBlock -or $confirmBlock -notmatch '^[Yy]') {
+                    Write-Host "  [CANCEL] Block operation aborted by user." -ForegroundColor Yellow
+                    Read-Host "`n  Press ENTER to return to menu..."
+                    return $true
+                }
+            }
+        }
     }
 
     Write-Host "  Discovered $($exes.Count) executable(s) to process.`n" -ForegroundColor Cyan
@@ -1190,12 +1418,12 @@ if ($ExportFunctionsOnly) {
 if (-not [string]::IsNullOrEmpty($Action)) {
     $actionSuccess = $true
     switch -Regex ($Action) {
-        '^(BlockAll|BlockBoth|Both)$'      { $actionSuccess = Invoke-BlockOperation -Dir $Script:CurrentTarget -Mode "Both" }
-        '^(BlockOutbound|Outbound)$'       { $actionSuccess = Invoke-BlockOperation -Dir $Script:CurrentTarget -Mode "OutboundOnly" }
-        '^(BlockInbound|Inbound)$'         { $actionSuccess = Invoke-BlockOperation -Dir $Script:CurrentTarget -Mode "InboundOnly" }
-        '^(UnblockDir|Unblock)$'           { $actionSuccess = Invoke-UnblockOperation -Dir $Script:CurrentTarget }
-        '^(UnblockAll|Purge)$'             { $actionSuccess = Invoke-UnblockAllSystem }
-        '^(Scan|Audit|List)$'              { $actionSuccess = Invoke-ScanAudit -Dir $Script:CurrentTarget }
+        '^(BlockAll|BlockBoth|Both)$'              { $actionSuccess = Invoke-BlockOperation -Dir $Script:CurrentTarget -Mode "Both" }
+        '^(BlockOutbound(Only)?|Outbound)$'       { $actionSuccess = Invoke-BlockOperation -Dir $Script:CurrentTarget -Mode "OutboundOnly" }
+        '^(BlockInbound(Only)?|Inbound)$'         { $actionSuccess = Invoke-BlockOperation -Dir $Script:CurrentTarget -Mode "InboundOnly" }
+        '^(UnblockDir|Unblock)$'                   { $actionSuccess = Invoke-UnblockOperation -Dir $Script:CurrentTarget }
+        '^(UnblockAll|Purge)$'                     { $actionSuccess = Invoke-UnblockAllSystem }
+        '^(Scan|Audit|List)$'                      { $actionSuccess = Invoke-ScanAudit -Dir $Script:CurrentTarget }
         '^(RepairService|RestartService|Repair|FixService)$' { $actionSuccess = Ensure-FirewallServiceRunning }
         default {
             Write-Host "Unknown Action: $Action. Valid actions: BlockBoth, BlockOutbound, BlockInbound, UnblockDir, UnblockAll, Scan, RepairService." -ForegroundColor Red
@@ -1247,6 +1475,11 @@ while ($true) {
     Write-Host "==============================================================================" -ForegroundColor Cyan
     
     $choice = Read-Host "  Select an option [0-9]"
+    if ($null -eq $choice) {
+        Write-Host "`n  [EOF] Standard input closed. Exiting FirewallBlocker." -ForegroundColor DarkCyan
+        Cleanup-TempElevationScript
+        break
+    }
 
     switch ($choice.Trim()) {
         "1" { Invoke-BlockOperation -Dir $Script:CurrentTarget -Mode "Both" }

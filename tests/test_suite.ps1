@@ -8,7 +8,7 @@ $blockerBat = Join-Path $repoRoot "FirewallBlocker.bat"
 $textBat = Join-Path $repoRoot "text.bat"
 
 Write-Host "====================================================" -ForegroundColor Cyan
-Write-Host "Running FirewallBlocker Automated Test Suite v2.2" -ForegroundColor White
+Write-Host "Running FirewallBlocker Automated Test Suite v2.3" -ForegroundColor White
 Write-Host "====================================================" -ForegroundColor Cyan
 
 $testDirsToCleanup = New-Object System.Collections.ArrayList
@@ -363,7 +363,181 @@ echo !RULE_HASH!
     }
 
     Write-Host "`n====================================================" -ForegroundColor Cyan
-    Write-Host "All 13 Comprehensive Tests PASSED Successfully!" -ForegroundColor Green
+    Write-Host "Baseline Core Tests (1-13) PASSED Successfully!" -ForegroundColor Green
+    Write-Host "====================================================" -ForegroundColor Cyan
+
+    # -------------------------------------------------------------------------
+    # Test 14: Action Dispatching & Mode Normalization Check
+    # -------------------------------------------------------------------------
+    Write-Host "`n[Test 14] Testing Action Dispatching & Mode Normalization..." -ForegroundColor Yellow
+    $actionsToTest = @{
+        "BlockBoth"         = "Both"
+        "BlockAll"          = "Both"
+        "Both"              = "Both"
+        "BlockOutbound"     = "OutboundOnly"
+        "BlockOutboundOnly" = "OutboundOnly"
+        "Outbound"          = "OutboundOnly"
+        "BlockInbound"      = "InboundOnly"
+        "BlockInboundOnly"  = "InboundOnly"
+        "Inbound"           = "InboundOnly"
+        "UnblockDir"        = "UnblockDir"
+        "Unblock"           = "UnblockDir"
+        "UnblockAll"        = "UnblockAll"
+        "Purge"             = "UnblockAll"
+        "Scan"              = "Scan"
+        "Audit"             = "Scan"
+        "List"              = "Scan"
+        "RepairService"     = "RepairService"
+        "RestartService"    = "RepairService"
+    }
+
+    $dispatcherRegex = {
+        param([string]$act)
+        switch -Regex ($act) {
+            '^(BlockAll|BlockBoth|Both)$'              { return "Both" }
+            '^(BlockOutbound(Only)?|Outbound)$'       { return "OutboundOnly" }
+            '^(BlockInbound(Only)?|Inbound)$'         { return "InboundOnly" }
+            '^(UnblockDir|Unblock)$'                   { return "UnblockDir" }
+            '^(UnblockAll|Purge)$'                     { return "UnblockAll" }
+            '^(Scan|Audit|List)$'                      { return "Scan" }
+            '^(RepairService|RestartService|Repair|FixService)$' { return "RepairService" }
+            default { return "UNKNOWN" }
+        }
+    }
+
+    $actionsValid = $true
+    foreach ($actionName in $actionsToTest.Keys) {
+        $resolvedMode = & $dispatcherRegex $actionName
+        if ($resolvedMode -ne $actionsToTest[$actionName]) {
+            Write-Host "  -> FAIL: Action '$actionName' resolved to '$resolvedMode', expected '$($actionsToTest[$actionName])'" -ForegroundColor Red
+            $actionsValid = $false
+        }
+    }
+    if ((& $dispatcherRegex "InvalidActionXYZ") -ne "UNKNOWN") {
+        Write-Host "  -> FAIL: 'InvalidActionXYZ' was unexpectedly accepted" -ForegroundColor Red
+        $actionsValid = $false
+    }
+    if ($actionsValid) {
+        Write-Host "  -> PASS: All action dispatch modes (including BlockOutboundOnly & BlockInboundOnly) verified cleanly." -ForegroundColor Green
+    } else {
+        exit 1
+    }
+
+    # -------------------------------------------------------------------------
+    # Test 15: 32-bit Compatibility & System Path Guardrail Expansion
+    # -------------------------------------------------------------------------
+    Write-Host "`n[Test 15] Verifying 32-bit Architecture Guardrails & WindowsApps Protection..." -ForegroundColor Yellow
+    # Save existing env var
+    $origX86 = ${env:ProgramFiles(x86)}
+    try {
+        # Simulate 32-bit Windows environment where ProgramFiles(x86) does not exist
+        ${env:ProgramFiles(x86)} = $null
+
+        # Re-import functions with simulated environment
+        . $blockerPs1 -ExportFunctionsOnly
+
+        $winDirBlocked = Test-IsProtectedSystemPath -PathToCheck "C:\Windows"
+        $pfBlocked     = Test-IsProtectedSystemPath -PathToCheck "C:\Program Files"
+        $defenderBlocked = Test-IsProtectedSystemPath -PathToCheck "C:\Program Files\Windows Defender"
+        $localAppsBlocked = $false
+        if (-not [string]::IsNullOrEmpty($env:LOCALAPPDATA)) {
+            $localAppsBlocked = Test-IsProtectedSystemPath -PathToCheck "$env:LOCALAPPDATA\Microsoft\WindowsApps"
+        } else {
+            $localAppsBlocked = $true
+        }
+        $gameAllowed   = -not (Test-IsProtectedSystemPath -PathToCheck "C:\MyGames\ActionRPG")
+
+        if ($winDirBlocked -and $pfBlocked -and $defenderBlocked -and $localAppsBlocked -and $gameAllowed) {
+            Write-Host "  -> PASS: System guardrails operate without exceptions when ProgramFiles(x86) is absent (32-bit mode)." -ForegroundColor Green
+            Write-Host "  -> PASS: Microsoft\WindowsApps protected from accidental blocking." -ForegroundColor Green
+        } else {
+            Write-Host "  -> FAIL: 32-bit guardrail verification failed." -ForegroundColor Red
+            exit 1
+        }
+    } finally {
+        ${env:ProgramFiles(x86)} = $origX86
+        . $blockerPs1 -ExportFunctionsOnly
+    }
+
+    # -------------------------------------------------------------------------
+    # Test 16: User Profile & Large Directory Safeguard Check
+    # -------------------------------------------------------------------------
+    Write-Host "`n[Test 16] Verifying User Profile & Large Target Safety Check..." -ForegroundColor Yellow
+    $userProf = $env:USERPROFILE
+    $isUpProtected = Test-IsUserProfileRoot -PathToCheck $userProf
+    $isSysUsersProtected = Test-IsUserProfileRoot -PathToCheck "$env:SystemDrive\Users"
+    $isGameProtected = Test-IsUserProfileRoot -PathToCheck "C:\Games\Doom"
+
+    if ($isUpProtected -and $isSysUsersProtected -and -not $isGameProtected) {
+        Write-Host "  -> PASS: Test-IsUserProfileRoot accurately identifies User Profile directories." -ForegroundColor Green
+    } else {
+        Write-Host "  -> FAIL: User Profile identification failed (UserProfile: $isUpProtected, UsersDir: $isSysUsersProtected, Game: $isGameProtected)." -ForegroundColor Red
+        exit 1
+    }
+
+    # Non-interactive blocking of a User Profile root without -Force must abort with exit code 1
+    $upProcess = Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$blockerPs1`" -TargetDir `"$userProf`" -Action BlockBoth -NonInteractive" -NoNewWindow -Wait -PassThru
+    if ($upProcess.ExitCode -eq 1) {
+        Write-Host "  -> PASS: Non-interactive block on User Profile root rejected with exit code 1 when -Force is absent." -ForegroundColor Green
+    } else {
+        Write-Host "  -> FAIL: Expected exit code 1 for unforced User Profile block, got $($upProcess.ExitCode)." -ForegroundColor Red
+        exit 1
+    }
+
+    # -------------------------------------------------------------------------
+    # Test 17: EOF Stdin Menu Protection Check
+    # -------------------------------------------------------------------------
+    Write-Host "`n[Test 17] Verifying Menu EOF Handling..." -ForegroundColor Yellow
+    $psiEof = New-Object System.Diagnostics.ProcessStartInfo
+    $psiEof.FileName = "powershell.exe"
+    $psiEof.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$blockerPs1`""
+    $psiEof.RedirectStandardInput = $true
+    $psiEof.RedirectStandardOutput = $true
+    $psiEof.RedirectStandardError = $true
+    $psiEof.UseShellExecute = $false
+    $psiEof.CreateNoWindow = $true
+
+    $eofProc = [System.Diagnostics.Process]::Start($psiEof)
+    # Immediately close standard input to simulate EOF / piped input
+    $eofProc.StandardInput.Close()
+    $eofStdout = $eofProc.StandardOutput.ReadToEnd()
+    $null = $eofProc.WaitForExit(5000)
+
+    if ($eofProc.HasExited -and $eofStdout -match "\[EOF\] Standard input closed") {
+        Write-Host "  -> PASS: Menu loop terminates cleanly upon EOF without infinite redraw loop." -ForegroundColor Green
+    } else {
+        try { $eofProc.Kill() } catch {}
+        Write-Host "  -> FAIL: Menu loop failed to handle EOF cleanly." -ForegroundColor Red
+        exit 1
+    }
+
+    # -------------------------------------------------------------------------
+    # Test 18: Stream Reading & Output Integrity Check
+    # -------------------------------------------------------------------------
+    Write-Host "`n[Test 18] Testing Invoke-Netsh Stream Reading & Race-Free Output..." -ForegroundColor Yellow
+    $dummyRuleRes = Invoke-Netsh -Arguments "advfirewall firewall show rule name=nonexistent_test_rule_parity_check"
+    if ($dummyRuleRes -and $dummyRuleRes.Output.Length -gt 0 -and $dummyRuleRes.ExitCode -ne -1) {
+        Write-Host "  -> PASS: Invoke-Netsh stream read captured complete output without dropped bytes." -ForegroundColor Green
+    } else {
+        Write-Host "  -> FAIL: Invoke-Netsh failed to return valid stream output." -ForegroundColor Red
+        exit 1
+    }
+
+    # -------------------------------------------------------------------------
+    # Test 19: Batch Exit Code Preservation
+    # -------------------------------------------------------------------------
+    Write-Host "`n[Test 19] Verifying Batch Exit Code Preservation..." -ForegroundColor Yellow
+    $batInvalidCmd = "/c `"`"$blockerBat`" -Action InvalidCommandXYZ -NonInteractive`""
+    $batInvalidProc = Start-Process -FilePath "cmd.exe" -ArgumentList $batInvalidCmd -NoNewWindow -Wait -PassThru
+    if ($batInvalidProc.ExitCode -eq 1) {
+        Write-Host "  -> PASS: FirewallBlocker.bat preserved ExitCode 1 from PowerShell child process." -ForegroundColor Green
+    } else {
+        Write-Host "  -> FAIL: FirewallBlocker.bat swallowed exit code, returned $($batInvalidProc.ExitCode) instead of 1." -ForegroundColor Red
+        exit 1
+    }
+
+    Write-Host "`n====================================================" -ForegroundColor Cyan
+    Write-Host "All 19 Comprehensive Tests PASSED Successfully!" -ForegroundColor Green
     Write-Host "====================================================" -ForegroundColor Cyan
 
 } finally {

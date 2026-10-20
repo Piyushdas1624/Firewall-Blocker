@@ -1,7 +1,7 @@
 @echo off
 setlocal DisableDelayedExpansion
 chcp 65001 >nul 2>&1
-title FirewallBlocker - Windows Firewall Manager (Win 7 - 11)
+title FirewallBlocker - Windows Firewall Manager (Win 7 - 11) v2.3
 
 :: -----------------------------------------------------------------------------
 :: Resolve script location and default target directory
@@ -12,18 +12,21 @@ if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
 :: -----------------------------------------------------------------------------
 :: Primary Execution: Universal PowerShell Engine (Win 7 SP1 - 11, Color-Coded)
 :: -----------------------------------------------------------------------------
-where powershell.exe >nul 2>&1
-if %errorlevel% equ 0 (
-    if exist "%SCRIPT_DIR%\FirewallBlocker.ps1" (
-        powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%\FirewallBlocker.ps1" -InitialDir "%SCRIPT_DIR%" %*
-        exit /b %errorlevel%
-    )
-    if exist "%SCRIPT_DIR%\run.ps1" (
-        powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%\run.ps1" -InitialDir "%SCRIPT_DIR%" %*
-        exit /b %errorlevel%
-    )
-)
+set "PS_SCRIPT="
+if exist "%SCRIPT_DIR%\FirewallBlocker.ps1" set "PS_SCRIPT=%SCRIPT_DIR%\FirewallBlocker.ps1"
+if not defined PS_SCRIPT if exist "%SCRIPT_DIR%\run.ps1" set "PS_SCRIPT=%SCRIPT_DIR%\run.ps1"
 
+if defined PS_SCRIPT (
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "exit 0" >nul 2>&1
+    if not errorlevel 1 goto RUN_POWERSHELL
+)
+goto RUN_BATCH
+
+:RUN_POWERSHELL
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%PS_SCRIPT%" -InitialDir "%SCRIPT_DIR%" %*
+exit /b %errorlevel%
+
+:RUN_BATCH
 :: -----------------------------------------------------------------------------
 :: Fallback Engine: Pure Native Batch (When PowerShell is Restricted/Unavailable)
 :: -----------------------------------------------------------------------------
@@ -144,6 +147,13 @@ if defined ProgramFiles(x86) (
     call set "TD_DEF_PF86=%%TD_SLASH:%ProgramFiles(x86)%\Windows Defender\=%%"
     if not "%TD_DEF_PF86%"=="%TD_SLASH%" goto PROTECTED_ERROR
 )
+
+:: Check LocalAppData Microsoft\WindowsApps (Windows Store execution aliases)
+if defined LOCALAPPDATA (
+    call set "TD_WINAPPS=%%TD_SLASH:%LOCALAPPDATA%\Microsoft\WindowsApps\=%%"
+    if not "%TD_WINAPPS%"=="%TD_SLASH%" goto PROTECTED_ERROR
+    if /i "%CHK_DIR%"=="%LOCALAPPDATA%\Microsoft\WindowsApps" goto PROTECTED_ERROR
+)
 exit /b 0
 
 :PROTECTED_ERROR
@@ -233,6 +243,46 @@ goto VALIDATE_AND_BLOCK
 if not defined TARGET_DIR call :CHECK_DIR_SET
 call :CHECK_PROTECTED
 if not defined TARGET_DIR goto MENU
+
+:: Check if target is User Profile root or large directory (> 100 exes)
+set "IS_SENSITIVE=0"
+if defined USERPROFILE if /i "%TARGET_DIR%"=="%USERPROFILE%" set "IS_SENSITIVE=1"
+if /i "%TARGET_DIR%"=="%SystemDrive%\Users" set "IS_SENSITIVE=1"
+if defined PUBLIC if /i "%TARGET_DIR%"=="%PUBLIC%" set "IS_SENSITIVE=1"
+
+set /a "PRE_COUNT=0"
+for /r "%TARGET_DIR%" %%F in (*.exe) do (
+    if not exist "%%~fF\*" set /a "PRE_COUNT+=1"
+)
+if %PRE_COUNT% gtr 100 set "IS_SENSITIVE=1"
+
+if "%IS_SENSITIVE%"=="1" (
+    cls
+    echo ==============================================================================
+    echo  [CONFIRMATION REQUIRED] POTENTIALLY SENSITIVE OR LARGE TARGET!
+    echo ==============================================================================
+    echo  Directory: "%TARGET_DIR%"
+    echo  Discovered executables: %PRE_COUNT%
+    if defined USERPROFILE if /i "%TARGET_DIR%"=="%USERPROFILE%" (
+        echo  [!] Warning: Target is a User Profile directory.
+        echo      Blocking this will affect AppData, Local, and Desktop applications.
+    )
+    if %PRE_COUNT% gtr 100 (
+        echo  [!] Warning: Target contains over 100 executables.
+    )
+    echo ==============================================================================
+    echo.
+    set "CONFIRM="
+    set /p "CONFIRM=Are you SURE you want to block all %PRE_COUNT% executable(s)? [Y/N]: "
+    if not defined CONFIRM goto CANCEL_BLOCK
+    if /i not "%CONFIRM:"=%"=="Y" goto CANCEL_BLOCK
+)
+goto DO_BLOCK
+
+:CANCEL_BLOCK
+echo  [CANCEL] Block operation cancelled by user.
+timeout /t 2 >nul 2>&1
+goto MENU
 
 :DO_BLOCK
 cls
