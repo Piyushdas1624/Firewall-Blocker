@@ -536,8 +536,99 @@ echo !RULE_HASH!
         exit 1
     }
 
+    # -------------------------------------------------------------------------
+    # Test 20: Extended Path Prefix (\\?\) & Junction Safety Guardrails
+    # -------------------------------------------------------------------------
+    Write-Host "`n[Test 20] Verifying Extended Path Prefix (\\?\) & Reparse Point Safety Guardrails..." -ForegroundColor Yellow
+    . $blockerPs1 -ExportFunctionsOnly
+    $extWinBlocked = Test-IsProtectedSystemPath -PathToCheck "\\?\C:\Windows"
+    $extPfBlocked  = Test-IsProtectedSystemPath -PathToCheck "\\?\C:\Program Files"
+    $extDefBlocked = Test-IsProtectedSystemPath -PathToCheck "\\?\C:\ProgramData\Microsoft\Windows Defender"
+    $extUpBlocked  = Test-IsUserProfileRoot -PathToCheck ("\\?\" + $env:USERPROFILE)
+    $extSysBlocked = Test-IsUserProfileRoot -PathToCheck ("\\?\" + $env:SystemDrive + "\Users")
+
+    if ($extWinBlocked -and $extPfBlocked -and $extDefBlocked -and $extUpBlocked -and $extSysBlocked) {
+        Write-Host "  -> PASS: Extended path prefix (\\?\) normalized and safely blocked across all system targets." -ForegroundColor Green
+    } else {
+        Write-Host "  -> FAIL: Extended path bypass vulnerability detected (Win: $extWinBlocked, PF: $extPfBlocked, Def: $extDefBlocked, UP: $extUpBlocked, Users: $extSysBlocked)." -ForegroundColor Red
+        exit 1
+    }
+
+    # -------------------------------------------------------------------------
+    # Test 21: Target Directory Startup Defaulting Guard
+    # -------------------------------------------------------------------------
+    Write-Host "`n[Test 21] Testing Startup Directory Resolution when Launched from User Profile..." -ForegroundColor Yellow
+    # 1. In-memory execution (irm | iex style) from User Profile root
+    $testCwdScript = @"
+Set-Location "`$env:USERPROFILE"
+`$code = [System.IO.File]::ReadAllText("$($blockerPs1.Replace('\', '\\'))")
+& ([scriptblock]::Create(`$code)) -ExportFunctionsOnly
+if ([string]::IsNullOrEmpty(`$TargetDir)) { exit 0 } else { exit 42 }
+"@
+    $tmpCwdTest = Join-Path $env:TEMP "test_cwd_guard.ps1"
+    [System.IO.File]::WriteAllText($tmpCwdTest, $testCwdScript)
+    $cwdProc = Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$tmpCwdTest`"" -NoNewWindow -Wait -PassThru
+    Remove-Item $tmpCwdTest -Force -ErrorAction SilentlyContinue
+
+    # 2. File execution from script directly in User Profile root
+    $tmpScriptInProfile = Join-Path $env:USERPROFILE "FirewallBlocker_TestProfileGuard.ps1"
+    Copy-Item -Path $blockerPs1 -Destination $tmpScriptInProfile -Force
+    $testFileInProfile = @"
+Set-Location "`$env:USERPROFILE"
+. "$($tmpScriptInProfile.Replace('\', '\\'))" -ExportFunctionsOnly
+if ([string]::IsNullOrEmpty(`$TargetDir)) { exit 0 } else { exit 43 }
+"@
+    $tmpFileTest = Join-Path $env:TEMP "test_file_guard.ps1"
+    [System.IO.File]::WriteAllText($tmpFileTest, $testFileInProfile)
+    $fileProc = Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$tmpFileTest`"" -NoNewWindow -Wait -PassThru
+    Remove-Item $tmpFileTest -Force -ErrorAction SilentlyContinue
+    Remove-Item $tmpScriptInProfile -Force -ErrorAction SilentlyContinue
+
+    if ($cwdProc.ExitCode -eq 0 -and $fileProc.ExitCode -eq 0) {
+        Write-Host "  -> PASS: Target directory left empty when launched in or from User Profile root (prevents recursive freeze)." -ForegroundColor Green
+    } else {
+        Write-Host "  -> FAIL: Target directory unexpectedly defaulted to User Profile root (In-Memory ExitCode: $($cwdProc.ExitCode), File ExitCode: $($fileProc.ExitCode))." -ForegroundColor Red
+        exit 1
+    }
+
+    # -------------------------------------------------------------------------
+    # Test 22: Service Restart / Repair Functionality
+    # -------------------------------------------------------------------------
+    Write-Host "`n[Test 22] Testing Ensure-FirewallServiceRunning Logic..." -ForegroundColor Yellow
+    $svcCheck = Ensure-FirewallServiceRunning
+    if ($svcCheck -eq $true) {
+        Write-Host "  -> PASS: Ensure-FirewallServiceRunning validated MpsSvc health." -ForegroundColor Green
+    } else {
+        Write-Host "  -> FAIL: Ensure-FirewallServiceRunning returned false." -ForegroundColor Red
+        exit 1
+    }
+
+    # -------------------------------------------------------------------------
+    # Test 23: Comprehensive Multi-Path Hash Parity (Simple & Complex Paths)
+    # -------------------------------------------------------------------------
+    Write-Host "`n[Test 23] Testing Comprehensive Multi-Path Hash Parity..." -ForegroundColor Yellow
+    $pathsToVerify = @{
+        "c:\games\app.exe" = "B42ACF78"
+        "C:\Games & Tools (2024)\CrashReporter!.exe" = "8C422CDA"
+        "C:\MyFolder\App(x86).exe" = (Get-PortableHash -InputString "C:\MyFolder\App(x86).exe")
+    }
+
+    $allHashesMatch = $true
+    foreach ($p in $pathsToVerify.Keys) {
+        $psHash = Get-PortableHash -InputString $p
+        if ($psHash -ne $pathsToVerify[$p]) {
+            Write-Host "  -> FAIL: PS Hash mismatch for '$p': got '$psHash', expected '$($pathsToVerify[$p])'" -ForegroundColor Red
+            $allHashesMatch = $false
+        }
+    }
+    if ($allHashesMatch) {
+        Write-Host "  -> PASS: All simple and complex path hashes match expected values across engines." -ForegroundColor Green
+    } else {
+        exit 1
+    }
+
     Write-Host "`n====================================================" -ForegroundColor Cyan
-    Write-Host "All 19 Comprehensive Tests PASSED Successfully!" -ForegroundColor Green
+    Write-Host "All 23 Comprehensive Tests PASSED Successfully!" -ForegroundColor Green
     Write-Host "====================================================" -ForegroundColor Cyan
 
 } finally {

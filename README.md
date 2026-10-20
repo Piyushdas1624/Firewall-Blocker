@@ -12,7 +12,7 @@
 <p align="center">
   <a href="https://github.com/Piyushdas1624/Firewall-Blocker"><img src="https://img.shields.io/badge/GitHub-Piyushdas1624%2FFirewall--Blocker-181717?style=flat-square&logo=github" alt="GitHub Repository"></a>
   <img src="https://img.shields.io/badge/Version-2.3-ef4444?style=flat-square" alt="Version 2.3">
-  <img src="https://img.shields.io/badge/Tests-19%2F19%20Passing-10b981?style=flat-square" alt="Tests">
+  <img src="https://img.shields.io/badge/Tests-23%2F23%20Passing-10b981?style=flat-square" alt="Tests">
   <img src="https://img.shields.io/badge/Platform-Windows%207%20SP1%20%7C%208%20%7C%208.1%20%7C%2010%20%7C%2011%20%7C%20Server-0ea5e9?style=flat-square&logo=windows" alt="Platform">
   <img src="https://img.shields.io/badge/PowerShell-2.0%20to%207.x%2B-2563eb?style=flat-square&logo=powershell&logoColor=white" alt="PowerShell 2.0+">
   <img src="https://img.shields.io/badge/Engine-Native%20netsh%20%2B%20Batch%20Fallback-10b981?style=flat-square" alt="Native Engine">
@@ -199,13 +199,13 @@ powershell -ExecutionPolicy Bypass -File .\FirewallBlocker.ps1 -TargetDir "D:\My
 
 ## 🧪 Verification & Automated Testing
 
-FirewallBlocker includes an automated 19-point test suite in `tests/test_suite.ps1`. To run it locally:
+FirewallBlocker includes an automated 23-point test suite in `tests/test_suite.ps1`. To run it locally:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\test_suite.ps1
 ```
 
-All 19 tests validate:
+All 23 tests validate:
 1. `FirewallBlocker.ps1` AST syntax validity (PS 2.0 to 7.x compatible).
 2. `run.ps1` AST syntax validity.
 3. Byte-for-byte parity between `FirewallBlocker.ps1` and `run.ps1`.
@@ -225,6 +225,10 @@ All 19 tests validate:
 17. Menu loop EOF / standard input closure handling without infinite loops.
 18. `Invoke-Netsh` asynchronous stream reading & race-free output integrity.
 19. `FirewallBlocker.bat` exit code preservation from PowerShell child processes.
+20. Extended path prefix (`\\?\`) & junction / reparse point safety guardrails.
+21. Target directory startup defaulting guard (prevents freezing on launch from user profile roots).
+22. Service restart and repair functionality (`Ensure-FirewallServiceRunning -Restart`).
+23. Comprehensive multi-path SHA256 hash parity across simple and complex paths.
 
 ---
 

@@ -17,7 +17,7 @@ if exist "%SCRIPT_DIR%\FirewallBlocker.ps1" set "PS_SCRIPT=%SCRIPT_DIR%\Firewall
 if not defined PS_SCRIPT if exist "%SCRIPT_DIR%\run.ps1" set "PS_SCRIPT=%SCRIPT_DIR%\run.ps1"
 
 if defined PS_SCRIPT (
-    powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "exit 0" >nul 2>&1
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "if ((Get-ExecutionPolicy) -eq 'Restricted' -or $ExecutionContext.SessionState.LanguageMode -eq 'ConstrainedLanguage') { exit 1 }; exit 0" >nul 2>&1
     if not errorlevel 1 goto RUN_POWERSHELL
 )
 goto RUN_BATCH
@@ -77,14 +77,15 @@ echo ===========================================================================
 set "CHOICE="
 set /p "CHOICE=Select an option [1-8]: "
 
-if "%CHOICE%"=="1" goto CHECK_AND_BLOCK_BOTH
-if "%CHOICE%"=="2" goto CHECK_AND_BLOCK_OUT
-if "%CHOICE%"=="3" goto CHECK_AND_BLOCK_IN
-if "%CHOICE%"=="4" goto CHECK_AND_UNBLOCK
-if "%CHOICE%"=="5" goto CHECK_AND_SCAN
-if "%CHOICE%"=="6" goto CHANGE_DIR
-if "%CHOICE%"=="7" goto OPEN_WF
-if "%CHOICE%"=="8" goto QUIT
+if not defined CHOICE goto MENU
+if /i "%CHOICE:"=%"=="1" goto CHECK_AND_BLOCK_BOTH
+if /i "%CHOICE:"=%"=="2" goto CHECK_AND_BLOCK_OUT
+if /i "%CHOICE:"=%"=="3" goto CHECK_AND_BLOCK_IN
+if /i "%CHOICE:"=%"=="4" goto CHECK_AND_UNBLOCK
+if /i "%CHOICE:"=%"=="5" goto CHECK_AND_SCAN
+if /i "%CHOICE:"=%"=="6" goto CHANGE_DIR
+if /i "%CHOICE:"=%"=="7" goto OPEN_WF
+if /i "%CHOICE:"=%"=="8" goto QUIT
 goto MENU
 
 :CHECK_DIR_SET
@@ -111,8 +112,9 @@ exit /b 0
 :CHECK_PROTECTED
 if not defined TARGET_DIR exit /b 1
 
-:: Normalize trailing slash
+:: Normalize trailing slash and extended path prefix
 set "CHK_DIR=%TARGET_DIR%"
+if "%CHK_DIR:~0,4%"=="\\?\" set "CHK_DIR=%CHK_DIR:~4%"
 if "%CHK_DIR:~-1%"=="\" set "CHK_DIR=%CHK_DIR:~0,-1%"
 
 :: Check root drive (e.g. C: or C:\)
@@ -246,9 +248,15 @@ if not defined TARGET_DIR goto MENU
 
 :: Check if target is User Profile root or large directory (> 100 exes)
 set "IS_SENSITIVE=0"
-if defined USERPROFILE if /i "%TARGET_DIR%"=="%USERPROFILE%" set "IS_SENSITIVE=1"
-if /i "%TARGET_DIR%"=="%SystemDrive%\Users" set "IS_SENSITIVE=1"
-if defined PUBLIC if /i "%TARGET_DIR%"=="%PUBLIC%" set "IS_SENSITIVE=1"
+set "CHK_SENS=%TARGET_DIR%"
+if "%CHK_SENS:~0,4%"=="\\?\" set "CHK_SENS=%CHK_SENS:~4%"
+if "%CHK_SENS:~-1%"=="\" set "CHK_SENS=%CHK_SENS:~0,-1%"
+if defined USERPROFILE if /i "%CHK_SENS%"=="%USERPROFILE%" set "IS_SENSITIVE=1"
+if /i "%CHK_SENS%"=="%SystemDrive%\Users" set "IS_SENSITIVE=1"
+if defined PUBLIC if /i "%CHK_SENS%"=="%PUBLIC%" set "IS_SENSITIVE=1"
+for /f "delims=" %%U in ("%CHK_SENS%") do (
+    if /i "%%~dpU"=="%SystemDrive%\Users\" set "IS_SENSITIVE=1"
+)
 
 set /a "PRE_COUNT=0"
 for /r "%TARGET_DIR%" %%F in (*.exe) do (

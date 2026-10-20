@@ -114,20 +114,25 @@ if (-not (Test-IsRealScriptContent -Code $Script:SelfCode)) {
 }
 
 function Cleanup-TempElevationScript {
+    param([switch]$CleanStaleOnly = $false)
+    # If THIS process is the elevated child running from a temp script, clean it up on exit
     if ($Script:RunningFromFile -and $Script:ScriptFilePath -and ($Script:ScriptFilePath -like "*FirewallBlocker_Elevated*.ps1")) {
         try {
-            Remove-Item -LiteralPath $Script:ScriptFilePath -Force -ErrorAction SilentlyContinue
-        } catch {}
+            Start-Process -WindowStyle Hidden -FilePath "cmd.exe" -ArgumentList "/c timeout /t 2 >nul & del `"$($Script:ScriptFilePath)`""
+        } catch {
+            try { Remove-Item -LiteralPath $Script:ScriptFilePath -Force -ErrorAction SilentlyContinue } catch {}
+        }
     }
+    # Only clean old stale scripts (> 5 min old) to avoid deleting in-flight elevation launches
     try {
         if (-not [string]::IsNullOrEmpty($env:TEMP) -and (Test-Path -LiteralPath $env:TEMP)) {
-            Get-ChildItem -LiteralPath $env:TEMP -Filter "*FirewallBlocker_Elevated*.ps1" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+            $cutoff = (Get-Date).AddMinutes(-5)
+            Get-ChildItem -LiteralPath $env:TEMP -Filter "*FirewallBlocker_Elevated*.ps1" -ErrorAction SilentlyContinue |
+                Where-Object { $_.LastWriteTime -lt $cutoff } |
+                Remove-Item -Force -ErrorAction SilentlyContinue
         }
     } catch {}
 }
-try {
-    $null = Register-EngineEvent -SourceIdentifier ([System.Management.Automation.PsEngineEvent]::Exiting) -Action { Cleanup-TempElevationScript } -SupportEvent
-} catch {}
 
 # ------------------------------------------------------------------------------
 # 2. System Validation & Safety Checks
@@ -148,9 +153,23 @@ function Test-IsProtectedSystemPath {
     
     try {
         $resolved = [System.IO.Path]::GetFullPath($PathToCheck).TrimEnd('\', '/')
+        if ($resolved.StartsWith('\\?\', [System.StringComparison]::OrdinalIgnoreCase)) {
+            $resolved = $resolved.Substring(4).TrimEnd('\', '/')
+        }
     } catch {
-        return $false
+        # Fail closed on invalid/unresolvable path to avoid security bypass
+        return $true
     }
+
+    # Also resolve reparse points / junctions
+    try {
+        $item = Get-Item -LiteralPath $resolved -ErrorAction SilentlyContinue
+        if ($item -and $item.Target) {
+            foreach ($t in @($item.Target)) {
+                if (Test-IsProtectedSystemPath -PathToCheck $t) { return $true }
+            }
+        }
+    } catch {}
     
     # Safe resolution using environment variables compatible with all Windows versions (Win 7 - 11)
     $winDir = $env:SystemRoot
@@ -240,9 +259,22 @@ function Test-IsUserProfileRoot {
     if ([string]::IsNullOrEmpty($PathToCheck)) { return $false }
     try {
         $resolved = [System.IO.Path]::GetFullPath($PathToCheck).TrimEnd('\', '/')
+        if ($resolved.StartsWith('\\?\', [System.StringComparison]::OrdinalIgnoreCase)) {
+            $resolved = $resolved.Substring(4).TrimEnd('\', '/')
+        }
     } catch {
         return $false
     }
+
+    # Also resolve reparse points / junctions
+    try {
+        $item = Get-Item -LiteralPath $resolved -ErrorAction SilentlyContinue
+        if ($item -and $item.Target) {
+            foreach ($t in @($item.Target)) {
+                if (Test-IsUserProfileRoot -PathToCheck $t) { return $true }
+            }
+        }
+    } catch {}
 
     $userProfile = $env:USERPROFILE
     if (-not [string]::IsNullOrEmpty($userProfile)) {
@@ -301,14 +333,14 @@ if ([string]::IsNullOrEmpty($TargetDir)) {
         $TargetDir = $InitialDir
     } elseif ($Script:RunningFromFile -and -not $isTempElevated -and -not $isTempDir) {
         $scriptParent = Split-Path -Parent $Script:ScriptFilePath
-        if (-not (Test-IsProtectedSystemPath -PathToCheck $scriptParent)) {
+        if (-not (Test-IsProtectedSystemPath -PathToCheck $scriptParent) -and -not (Test-IsUserProfileRoot -PathToCheck $scriptParent)) {
             $TargetDir = $scriptParent
         } else {
             $TargetDir = ""
         }
     } else {
         $cwd = (Get-Location).Path
-        if (-not (Test-IsProtectedSystemPath -PathToCheck $cwd) -and -not $isTempDir) {
+        if (-not (Test-IsProtectedSystemPath -PathToCheck $cwd) -and -not (Test-IsUserProfileRoot -PathToCheck $cwd) -and -not $isTempDir) {
             $TargetDir = $cwd
         } else {
             $TargetDir = ""
@@ -357,7 +389,7 @@ $Script:CachedExeCount = -1
 
 function Get-CachedExecutableCount {
     param([string]$Dir)
-    if ([string]::IsNullOrEmpty($Dir) -or -not (Test-Path -LiteralPath $Dir) -or (Test-IsProtectedSystemPath -PathToCheck $Dir)) {
+    if ([string]::IsNullOrEmpty($Dir) -or -not (Test-Path -LiteralPath $Dir) -or (Test-IsProtectedSystemPath -PathToCheck $Dir) -or (Test-IsUserProfileRoot -PathToCheck $Dir)) {
         return 0
     }
     if ($Script:CachedDir -eq $Dir -and $Script:CachedExeCount -ge 0) {
@@ -384,6 +416,8 @@ function Write-StatusCard {
         Write-Host "[NOT SET] - Drag & drop a folder or select Option 7" -ForegroundColor Yellow
     } elseif (Test-IsProtectedSystemPath -PathToCheck $Dir) {
         Write-Host "$Dir [PROTECTED SYSTEM FOLDER - CANNOT BLOCK]" -ForegroundColor Red
+    } elseif (Test-IsUserProfileRoot -PathToCheck $Dir) {
+        Write-Host "$Dir [USER PROFILE ROOT - SENSITIVE TARGET]" -ForegroundColor Yellow
     } else {
         Write-Host "$Dir" -ForegroundColor Yellow
     }
@@ -391,6 +425,8 @@ function Write-StatusCard {
     Write-Host "  Discovered .EXEs   : " -ForegroundColor Gray -NoNewline
     if ([string]::IsNullOrEmpty($Dir) -or (Test-IsProtectedSystemPath -PathToCheck $Dir)) {
         Write-Host "None (Select target folder first)" -ForegroundColor DarkGray
+    } elseif (Test-IsUserProfileRoot -PathToCheck $Dir) {
+        Write-Host "User profile root (Press 6 to audit or 7 to change)" -ForegroundColor Yellow
     } else {
         $exeCount = Get-CachedExecutableCount -Dir $Dir
         if ($exeCount -gt 0) {
@@ -472,9 +508,7 @@ function Assert-Elevated {
         }
     } else {
         # Running in-memory (e.g. irm | iex). Write self script content to a unique temp file.
-        try {
-            Get-ChildItem -Path $env:TEMP -Filter "*FirewallBlocker_Elevated*.ps1" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
-        } catch {}
+        Cleanup-TempElevationScript -CleanStaleOnly
         $tempGuid = [System.Guid]::NewGuid().ToString("N").Substring(0, 8)
         $tempScript = Join-Path $env:TEMP "FirewallBlocker_Elevated_$tempGuid.ps1"
         try {
@@ -497,7 +531,7 @@ function Assert-Elevated {
             if (-not (Test-IsRealScriptContent -Code $scriptPayload)) {
                 Write-Host "  [FAIL] Could not elevate: Full script content is unavailable in memory." -ForegroundColor Red
                 Write-Host "         Please save FirewallBlocker.ps1 locally or run from an elevated PowerShell console." -ForegroundColor Yellow
-                if ($IsNonInteractive) { Cleanup-TempElevationScript; exit 1 }
+                if ($IsNonInteractive) { exit 1 }
                 return $false
             }
 
@@ -505,16 +539,17 @@ function Assert-Elevated {
             $psiArgs = "-NoProfile -ExecutionPolicy Bypass -File `"$tempScript`"$argsToPass"
             if ($IsNonInteractive) {
                 $elevProc = Start-Process -FilePath "powershell.exe" -ArgumentList $psiArgs -Verb RunAs -Wait -PassThru
-                Cleanup-TempElevationScript
+                try { Remove-Item -LiteralPath $tempScript -Force -ErrorAction SilentlyContinue } catch {}
                 exit $elevProc.ExitCode
             } else {
                 Start-Process -FilePath "powershell.exe" -ArgumentList $psiArgs -Verb RunAs
-                Cleanup-TempElevationScript
+                # In interactive mode, child process will clean up $tempScript on exit.
+                # Do NOT delete $tempScript here while child is starting!
                 exit 0
             }
         } catch {
             Write-Host "  [FAIL] Could not initiate elevated launcher: $($_.Exception.Message)" -ForegroundColor Red
-            if ($IsNonInteractive) { Cleanup-TempElevationScript; exit 1 }
+            if ($IsNonInteractive) { exit 1 }
             return $false
         }
     }
@@ -549,13 +584,19 @@ function Test-FirewallService {
 }
 
 function Ensure-FirewallServiceRunning {
+    param([switch]$Restart = $false)
     $svcInfo = Test-FirewallService
-    if ($svcInfo.Running) { return $true }
+    if ($svcInfo.Running -and -not $Restart) { return $true }
 
-    Write-Host ""
-    Write-Host "  [!] WARNING: Windows Defender Firewall service (MpsSvc) is $($svcInfo.Status)." -ForegroundColor Yellow
-    Write-Host "      Windows cannot create or enforce firewall rules while this service is stopped." -ForegroundColor DarkYellow
-    Write-Host ""
+    if ($Restart) {
+        Write-Host ""
+        Write-Host "  [*] Verifying and restarting Windows Defender Firewall service (MpsSvc)..." -ForegroundColor Cyan
+    } else {
+        Write-Host ""
+        Write-Host "  [!] WARNING: Windows Defender Firewall service (MpsSvc) is $($svcInfo.Status)." -ForegroundColor Yellow
+        Write-Host "      Windows cannot create or enforce firewall rules while this service is stopped." -ForegroundColor DarkYellow
+        Write-Host ""
+    }
     
     if (-not (Test-IsAdmin)) {
         Write-Host "  [!] Administrator privileges are required to configure and start MpsSvc." -ForegroundColor Red
@@ -564,8 +605,7 @@ function Ensure-FirewallServiceRunning {
         }
     }
 
-    if ($NonInteractive) {
-        Write-Host "  [*] NonInteractive mode: Attempting to configure and start MpsSvc..." -ForegroundColor Cyan
+    if ($NonInteractive -or $Restart) {
         $choice = "Y"
     } else {
         $choice = Read-Host "  Would you like to automatically configure and start Windows Firewall service now? [Y/N]"
@@ -576,6 +616,12 @@ function Ensure-FirewallServiceRunning {
         try {
             # Use sc.exe config for universal compatibility across Win 7 - 11 even if Disabled
             $pConfig = Start-Process -FilePath "sc.exe" -ArgumentList "config MpsSvc start= auto" -NoNewWindow -Wait -PassThru
+            if ($Restart) {
+                Write-Host "  [*] Stopping MpsSvc service..." -ForegroundColor Cyan
+                $pStop = Start-Process -FilePath "sc.exe" -ArgumentList "stop MpsSvc" -NoNewWindow -Wait -PassThru
+                Start-Sleep -Seconds 1
+            }
+            Write-Host "  [*] Starting MpsSvc service..." -ForegroundColor Cyan
             $pStart = Start-Process -FilePath "sc.exe" -ArgumentList "start MpsSvc" -NoNewWindow -Wait -PassThru
             Start-Sleep -Seconds 2
             $newSvc = Get-Service -Name MpsSvc -ErrorAction SilentlyContinue
@@ -648,32 +694,32 @@ function Invoke-Netsh {
                 try { $proc.Kill() } catch {}
             }
             # Drain stream tasks completely - wait up to 3000ms after process exit
-            if (-not $outTask.Wait(3000)) {
-                try { $stdout = $outTask.Result } catch { $stdout = "" }
-            } else {
-                $stdout = $outTask.Result
-            }
-            if (-not $errTask.Wait(3000)) {
-                try { $stderr = $errTask.Result } catch { $stderr = "" }
-            } else {
-                $stderr = $errTask.Result
-            }
+            try { [System.Threading.Tasks.Task]::WaitAll(@($outTask, $errTask), 3000) } catch {}
+            $stdout = if ($outTask.IsCompleted -and -not $outTask.IsFaulted) { $outTask.Result } else { "" }
+            $stderr = if ($errTask.IsCompleted -and -not $errTask.IsFaulted) { $errTask.Result } else { "" }
         } else {
-            # Synchronous fallback for legacy PowerShell 2.0 / .NET 2.0/3.5
-            # Read stderr asynchronously via event handler to prevent pipe buffer deadlock
+            # Asynchronous event reading for legacy PowerShell 2.0 / .NET 2.0/3.5
+            # Prevents pipe deadlock and ensures timeout actually terminates hung processes
+            $outSb = New-Object System.Text.StringBuilder
             $errSb = New-Object System.Text.StringBuilder
+            $outHandler = [System.Diagnostics.DataReceivedEventHandler]{
+                param($s, $e)
+                if ($e.Data) { $null = $outSb.AppendLine($e.Data) }
+            }
             $errHandler = [System.Diagnostics.DataReceivedEventHandler]{
                 param($s, $e)
                 if ($e.Data) { $null = $errSb.AppendLine($e.Data) }
             }
+            $proc.add_OutputDataReceived($outHandler)
             $proc.add_ErrorDataReceived($errHandler)
+            $proc.BeginOutputReadLine()
             $proc.BeginErrorReadLine()
 
-            $stdout = $proc.StandardOutput.ReadToEnd()
             if (-not $proc.WaitForExit(15000)) {
                 try { $proc.Kill() } catch {}
             }
             try { $proc.WaitForExit() } catch {}
+            $stdout = $outSb.ToString()
             $stderr = $errSb.ToString()
         }
 
@@ -803,9 +849,9 @@ function Test-ExecutableRuleStatus {
                     $rules = @(Get-NetFirewallRule -Name $ruleDisplayName -ErrorAction SilentlyContinue)
                 }
                 foreach ($r in $rules) {
-                    $isEnabled = ($r.Enabled -eq [Microsoft.PowerShell.Cmdletization.GeneratedTypes.NetSecurity.Enabled]::True -or $r.Enabled -eq "True" -or $r.Enabled -eq 1)
+                    $isEnabled = ("$($r.Enabled)" -eq "True" -or $r.Enabled -eq 1 -or $r.Enabled -eq $true)
                     if ($isEnabled) {
-                        $act = $r.Action.ToString()
+                        $act = "$($r.Action)"
                         if ($act -eq "Block" -or $r.Action -eq 4 -or $r.Action -eq 2) {
                             return $true
                         }
@@ -1496,11 +1542,11 @@ while ($true) {
                 Start-Sleep -Seconds 2
                 continue
             }
-            $svcRes = Ensure-FirewallServiceRunning
+            $svcRes = Ensure-FirewallServiceRunning -Restart
             if ($svcRes) { 
                 Write-Host "  [OK] Service is active and ready." -ForegroundColor Green 
             } else {
-                Write-Host "  [FAIL] Failed to start Windows Defender Firewall service (MpsSvc)." -ForegroundColor Red
+                Write-Host "  [FAIL] Failed to restart/repair Windows Defender Firewall service (MpsSvc)." -ForegroundColor Red
             }
             Start-Sleep -Seconds 2
         }
