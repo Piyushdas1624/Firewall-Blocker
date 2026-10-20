@@ -8,7 +8,7 @@ $blockerBat = Join-Path $repoRoot "FirewallBlocker.bat"
 $textBat = Join-Path $repoRoot "text.bat"
 
 Write-Host "====================================================" -ForegroundColor Cyan
-Write-Host "Running FirewallBlocker Automated Test Suite v2.4" -ForegroundColor White
+Write-Host "Running FirewallBlocker Automated Test Suite v2.5" -ForegroundColor White
 Write-Host "====================================================" -ForegroundColor Cyan
 
 $testDirsToCleanup = New-Object System.Collections.ArrayList
@@ -633,8 +633,82 @@ if ([string]::IsNullOrEmpty(`$TargetDir)) { exit 0 } else { exit 43 }
         exit 1
     }
 
+    # -------------------------------------------------------------------------
+    # Test 24: Verifying Advanced / Power User Mode Restrictions & Core OS Guard
+    # -------------------------------------------------------------------------
+    Write-Host "`n[Test 24] Verifying Advanced / Power User Mode Overrides & Core OS Protection..." -ForegroundColor Yellow
+    . $blockerPs1 -ExportFunctionsOnly
+
+    # 1. Advanced Mode bypasses Program Files, ProgramData, drive roots, and Defender
+    $advPfAllowed       = -not (Test-IsProtectedSystemPath -PathToCheck "C:\Program Files" -IsAdvanced)
+    $advPf86Allowed     = $true
+    if (-not [string]::IsNullOrEmpty(${env:ProgramFiles(x86)})) {
+        $advPf86Allowed = -not (Test-IsProtectedSystemPath -PathToCheck ${env:ProgramFiles(x86)} -IsAdvanced)
+    }
+    $advDriveAllowed    = -not (Test-IsProtectedSystemPath -PathToCheck "$env:SystemDrive\" -IsAdvanced)
+    $advDefAllowed      = -not (Test-IsProtectedSystemPath -PathToCheck "$env:ProgramData\Microsoft\Windows Defender" -IsAdvanced)
+    $advExtPfAllowed   = -not (Test-IsProtectedSystemPath -PathToCheck "\\?\C:\Program Files" -IsAdvanced)
+
+    if ($advPfAllowed -and $advPf86Allowed -and $advDriveAllowed -and $advDefAllowed -and $advExtPfAllowed) {
+        Write-Host "  -> PASS: Advanced Mode successfully overrides Program Files, ProgramData, drive roots, and Defender." -ForegroundColor Green
+    } else {
+        Write-Host "  -> FAIL: Advanced Mode failed to override folder restrictions (PF: $advPfAllowed, PF86: $advPf86Allowed, Drive: $advDriveAllowed, Def: $advDefAllowed, ExtPF: $advExtPfAllowed)." -ForegroundColor Red
+        exit 1
+    }
+
+    # 2. Core OS Stability Protection (C:\Windows, System32) MUST remain protected in Advanced Mode without -Force
+    $advWinBlocked      = Test-IsProtectedSystemPath -PathToCheck "C:\Windows" -IsAdvanced
+    $advSys32Blocked    = Test-IsProtectedSystemPath -PathToCheck "C:\Windows\System32" -IsAdvanced
+    $advSys32Forced     = -not (Test-IsProtectedSystemPath -PathToCheck "C:\Windows\System32" -IsAdvanced -IsForce)
+
+    if ($advWinBlocked -and $advSys32Blocked -and $advSys32Forced) {
+        Write-Host "  -> PASS: Core OS stability protection (C:\Windows\System32) strictly guarded in Advanced Mode unless explicitly combined with -Force." -ForegroundColor Green
+    } else {
+        Write-Host "  -> FAIL: Core OS protection failed in Advanced Mode (WinBlocked: $advWinBlocked, Sys32Blocked: $advSys32Blocked, Sys32Forced: $advSys32Forced)." -ForegroundColor Red
+        exit 1
+    }
+
+    # 3. CLI execution of -AdvancedMode and -ExpertMode on Program Files
+    $advScanProc = Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$blockerPs1`" -TargetDir `"C:\Program Files`" -Action Scan -AdvancedMode -NonInteractive" -NoNewWindow -Wait -PassThru
+    $expertScanProc = Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$blockerPs1`" -TargetDir `"C:\Program Files`" -Action Scan -ExpertMode -NonInteractive" -NoNewWindow -Wait -PassThru
+    $coreOsProc = Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$blockerPs1`" -TargetDir `"C:\Windows\System32`" -Action BlockBoth -AdvancedMode -NonInteractive" -NoNewWindow -Wait -PassThru
+
+    if ($advScanProc.ExitCode -eq 0 -and $expertScanProc.ExitCode -eq 0 -and $coreOsProc.ExitCode -eq 2) {
+        Write-Host "  -> PASS: -AdvancedMode and -ExpertMode CLI switches permitted target execution on Program Files (ExitCode 0), while core OS System32 was guarded (ExitCode 2)." -ForegroundColor Green
+    } else {
+        Write-Host "  -> FAIL: CLI execution check failed (AdvScan: $($advScanProc.ExitCode), ExpertScan: $($expertScanProc.ExitCode), CoreOS: $($coreOsProc.ExitCode))." -ForegroundColor Red
+        exit 1
+    }
+
+    # -------------------------------------------------------------------------
+    # Test 25: Verifying Batch Fallback Engine Advanced Mode Handling
+    # -------------------------------------------------------------------------
+    Write-Host "`n[Test 25] Verifying Batch Fallback Engine Advanced Mode Handling..." -ForegroundColor Yellow
+    $batCode = [System.IO.File]::ReadAllText($blockerBat)
+
+    $hasBatAdvArg     = ($batCode -match '(?i)-AdvancedMode')
+    $hasBatExpertArg  = ($batCode -match '(?i)-ExpertMode')
+    $hasBatToggle     = ($batCode -match '(?i):TOGGLE_ADVANCED')
+    $hasBatCoreOsErr  = ($batCode -match '(?i):CORE_OS_ERROR')
+
+    if ($hasBatAdvArg -and $hasBatExpertArg -and $hasBatToggle -and $hasBatCoreOsErr) {
+        Write-Host "  -> PASS: FirewallBlocker.bat verified with -AdvancedMode argument detection, menu toggle, and core OS protection." -ForegroundColor Green
+    } else {
+        Write-Host "  -> FAIL: Batch Advanced Mode verification failed (Arg: $hasBatAdvArg, ExpertArg: $hasBatExpertArg, Toggle: $hasBatToggle, CoreOS: $hasBatCoreOsErr)." -ForegroundColor Red
+        exit 1
+    }
+
+    # Test batch file delegating -AdvancedMode to PowerShell
+    $batAdvProc = Start-Process -FilePath "cmd.exe" -ArgumentList "/c `"`"$blockerBat`" -TargetDir `"$dummyRoot`" -Action Scan -AdvancedMode -NonInteractive`"" -NoNewWindow -Wait -PassThru
+    if ($batAdvProc.ExitCode -eq 0) {
+        Write-Host "  -> PASS: FirewallBlocker.bat successfully delegated -AdvancedMode with ExitCode 0." -ForegroundColor Green
+    } else {
+        Write-Host "  -> FAIL: FirewallBlocker.bat returned exit code $($batAdvProc.ExitCode) for -AdvancedMode." -ForegroundColor Red
+        exit 1
+    }
+
     Write-Host "`n====================================================" -ForegroundColor Cyan
-    Write-Host "All 23 Comprehensive Tests PASSED Successfully!" -ForegroundColor Green
+    Write-Host "All 25 Comprehensive Tests PASSED Successfully!" -ForegroundColor Green
     Write-Host "====================================================" -ForegroundColor Cyan
 
 } finally {

@@ -1,7 +1,7 @@
 @echo off
 setlocal DisableDelayedExpansion
 chcp 65001 >nul 2>&1
-title FirewallBlocker - Windows Firewall Manager (Win 7 - 11) v2.4
+title FirewallBlocker - Windows Firewall Manager (Win 7 - 11) v2.5
 
 :: -----------------------------------------------------------------------------
 :: Resolve script location and default target directory
@@ -40,6 +40,18 @@ if %errorlevel% neq 0 (
     exit /b 1
 )
 
+set "ADVANCED_MODE=0"
+for %%A in (%*) do (
+    if /i "%%~A"=="-AdvancedMode" set "ADVANCED_MODE=1"
+    if /i "%%~A"=="/AdvancedMode" set "ADVANCED_MODE=1"
+    if /i "%%~A"=="-ExpertMode" set "ADVANCED_MODE=1"
+    if /i "%%~A"=="/ExpertMode" set "ADVANCED_MODE=1"
+    if /i "%%~A"=="-Advanced" set "ADVANCED_MODE=1"
+    if /i "%%~A"=="/Advanced" set "ADVANCED_MODE=1"
+    if /i "%%~A"=="-Expert" set "ADVANCED_MODE=1"
+    if /i "%%~A"=="/Expert" set "ADVANCED_MODE=1"
+)
+
 set "TARGET_DIR=%SCRIPT_DIR%"
 if not "%~1"=="" if exist "%~1" (
     for %%I in ("%~1") do set "TARGET_DIR=%%~fI"
@@ -62,6 +74,11 @@ if defined TARGET_DIR (
 ) else (
     echo  [NOT SET - Please Select Option 6 or Drag and Drop a Folder]
 )
+if "%ADVANCED_MODE%"=="1" (
+    echo  User Role / Mode: ADVANCED / POWER USER [RESTRICTIONS OVERRIDDEN]
+) else (
+    echo  User Role / Mode: STANDARD [SAFE GUARDRAILS ACTIVE]
+)
 echo ==============================================================================
 echo.
 echo  [1] BLOCK all .exe files (Inbound + Outbound)
@@ -71,11 +88,16 @@ echo  [4] UNBLOCK all .exe files (Remove created rules)
 echo  [5] SCAN / LIST all .exe files in target folder
 echo  [6] CHANGE target folder
 echo  [7] Open Windows Firewall GUI (wf.msc)
+if "%ADVANCED_MODE%"=="1" (
+    echo  [A] TOGGLE Advanced Mode [ENABLED - Press A to disable]
+) else (
+    echo  [A] TOGGLE Advanced Mode [DISABLED - Press A to enable]
+)
 echo  [8] Exit
 echo.
 echo ==============================================================================
 set "CHOICE="
-set /p "CHOICE=Select an option [1-8]: "
+set /p "CHOICE=Select an option [1-8, A]: "
 
 if not defined CHOICE goto MENU
 if /i "%CHOICE:"=%"=="1" goto CHECK_AND_BLOCK_BOTH
@@ -85,7 +107,42 @@ if /i "%CHOICE:"=%"=="4" goto CHECK_AND_UNBLOCK
 if /i "%CHOICE:"=%"=="5" goto CHECK_AND_SCAN
 if /i "%CHOICE:"=%"=="6" goto CHANGE_DIR
 if /i "%CHOICE:"=%"=="7" goto OPEN_WF
+if /i "%CHOICE:"=%"=="A" goto TOGGLE_ADVANCED
 if /i "%CHOICE:"=%"=="8" goto QUIT
+goto MENU
+
+:TOGGLE_ADVANCED
+if "%ADVANCED_MODE%"=="1" (
+    set "ADVANCED_MODE=0"
+    echo.
+    echo  [OK] Advanced / Power User Mode DISABLED. Standard safety guardrails active.
+    timeout /t 1 >nul 2>&1
+    goto MENU
+)
+cls
+echo ==============================================================================
+echo  [CRITICAL WARNING] ENABLING ADVANCED / POWER USER MODE
+echo ==============================================================================
+echo  Advanced mode removes folder restrictions and allows targeting
+echo  Program Files, Program Files (x86), ProgramData, and custom root drives (C:\).
+echo.
+echo  [!] WARNING: Blocking essential application or driver executables may break
+echo      networking or software functionality.
+echo      Core OS files (%SystemRoot%) remain protected!
+echo ==============================================================================
+echo.
+set "CONF_ADV="
+set /p "CONF_ADV=Enable Advanced / Power User Mode? [Y/N]: "
+if /i "%CONF_ADV:"=%"=="Y" (
+    set "ADVANCED_MODE=1"
+    echo.
+    echo  [OK] Advanced / Power User Mode ENABLED. Folder restrictions overridden.
+    timeout /t 2 >nul 2>&1
+) else (
+    echo.
+    echo  [CANCEL] Advanced Mode not enabled.
+    timeout /t 1 >nul 2>&1
+)
 goto MENU
 
 :CHECK_DIR_SET
@@ -117,15 +174,19 @@ set "CHK_DIR=%TARGET_DIR%"
 if "%CHK_DIR:~0,4%"=="\\?\" set "CHK_DIR=%CHK_DIR:~4%"
 if "%CHK_DIR:~-1%"=="\" set "CHK_DIR=%CHK_DIR:~0,-1%"
 
+:: Core Windows OS kernel stability protection (Always blocked)
+set "TD_SLASH=%CHK_DIR%\"
+call set "TD_SUB=%%TD_SLASH:%SystemRoot%\=%%"
+if not "%TD_SUB%"=="%TD_SLASH%" goto CORE_OS_ERROR
+if /i "%CHK_DIR%"=="%SystemRoot%" goto CORE_OS_ERROR
+
+:: In Advanced / Power User mode, bypass Program Files, ProgramData, drive roots, and Defender
+if "%ADVANCED_MODE%"=="1" exit /b 0
+
+:: Standard Mode protections:
 :: Check root drive (e.g. C: or C:\)
 if "%CHK_DIR:~1,2%"==":\" if "%CHK_DIR:~3%"=="" goto PROTECTED_ERROR
 if "%CHK_DIR:~1,1%"==":" if "%CHK_DIR:~2%"=="" goto PROTECTED_ERROR
-
-:: Check Windows directory or any subdirectory (System32, SysWOW64, WinSxS, etc.)
-set "TD_SLASH=%CHK_DIR%\"
-call set "TD_SUB=%%TD_SLASH:%SystemRoot%\=%%"
-if not "%TD_SUB%"=="%TD_SLASH%" goto PROTECTED_ERROR
-if /i "%CHK_DIR%"=="%SystemRoot%" goto PROTECTED_ERROR
 
 :: Check Program Files & Program Files (x86) root directory directly
 if /i "%CHK_DIR%"=="%ProgramFiles%" goto PROTECTED_ERROR
@@ -158,6 +219,19 @@ if defined LOCALAPPDATA (
 )
 exit /b 0
 
+:CORE_OS_ERROR
+cls
+echo ==============================================================================
+echo  [CRITICAL SAFETY BLOCK] TARGET IS CORE WINDOWS OS DIRECTORY!
+echo ==============================================================================
+echo  Directory: "%TARGET_DIR%"
+echo  Blocking Windows OS system folders will break Windows networking and updates!
+echo  Operation aborted immediately to protect operating system stability.
+echo ==============================================================================
+pause
+set "TARGET_DIR="
+exit /b 1
+
 :PROTECTED_ERROR
 cls
 echo ==============================================================================
@@ -165,6 +239,8 @@ echo  [CRITICAL SAFETY BLOCK] TARGET IS A PROTECTED WINDOWS SYSTEM PATH!
 echo ==============================================================================
 echo  Directory: "%TARGET_DIR%"
 echo  Blocking Windows system folders will break Windows networking and updates!
+echo  Tip: Enable Advanced / Power User Mode [Option A] to override restrictions
+echo       for Program Files, ProgramData, and custom root paths.
 echo  Operation aborted immediately to protect system stability.
 echo ==============================================================================
 pause
@@ -284,6 +360,22 @@ if "%IS_SENSITIVE%"=="1" (
     set /p "CONFIRM=Are you SURE you want to block all %PRE_COUNT% executable(s)? [Y/N]: "
     if not defined CONFIRM goto CANCEL_BLOCK
     if /i not "%CONFIRM:"=%"=="Y" goto CANCEL_BLOCK
+)
+
+if "%ADVANCED_MODE%"=="1" if not "%IS_SENSITIVE%"=="1" (
+    cls
+    echo ==============================================================================
+    echo  [ADVANCED / POWER USER WARNING] SYSTEM DIRECTORY OVERRIDE ACTIVE!
+    echo ==============================================================================
+    echo  Directory: "%TARGET_DIR%"
+    echo  [!] WARNING: Operating in Advanced Mode. Modifying system folder rules
+    echo      can affect application communications or system services.
+    echo ==============================================================================
+    echo.
+    set "CONFIRM_ADV="
+    set /p "CONFIRM_ADV=Do you want to proceed with applying rules to this folder? [Y/N]: "
+    if not defined CONFIRM_ADV goto CANCEL_BLOCK
+    if /i not "%CONFIRM_ADV:"=%"=="Y" goto CANCEL_BLOCK
 )
 goto DO_BLOCK
 

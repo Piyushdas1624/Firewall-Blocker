@@ -11,8 +11,8 @@
 
 <p align="center">
   <a href="https://github.com/Piyushdas1624/Firewall-Blocker"><img src="https://img.shields.io/badge/GitHub-Piyushdas1624%2FFirewall--Blocker-181717?style=flat-square&logo=github" alt="GitHub Repository"></a>
-  <img src="https://img.shields.io/badge/Version-2.4-ef4444?style=flat-square" alt="Version 2.4">
-  <img src="https://img.shields.io/badge/Tests-23%2F23%20Passing-10b981?style=flat-square" alt="Tests">
+  <img src="https://img.shields.io/badge/Version-2.5-ef4444?style=flat-square" alt="Version 2.5">
+  <img src="https://img.shields.io/badge/Tests-25%2F25%20Passing-10b981?style=flat-square" alt="Tests">
   <img src="https://img.shields.io/badge/Platform-Windows%207%20SP1%20%7C%208%20%7C%208.1%20%7C%2010%20%7C%2011%20%7C%20Server-0ea5e9?style=flat-square&logo=windows" alt="Platform">
   <img src="https://img.shields.io/badge/PowerShell-2.0%20to%207.x%2B-2563eb?style=flat-square&logo=powershell&logoColor=white" alt="PowerShell 2.0+">
   <img src="https://img.shields.io/badge/Engine-Native%20netsh%20%2B%20Batch%20Fallback-10b981?style=flat-square" alt="Native Engine">
@@ -48,6 +48,7 @@ I built **FirewallBlocker** to eliminate this friction forever: a universal, zer
 | **Offline / Restricted Environments** | ❌ Crashes without PowerShell 5.1 | ✅ **Hardened native CMD batch fallback (`FirewallBlocker.bat`)** |
 | **Special Character Handling** | ❌ Stripped or broken by delayed expansion (`!`, `&`, `[]`) | ✅ **100% path-safe via isolated expansion & literal quoting** |
 | **System Directory Safety** | ❌ Easy to accidentally target `C:\Windows\System32` | 🛑 **Critical safety guard blocks OS directories (`ExitCode 2`)** |
+| **Power User / Advanced Override** | ❌ Hard-coded restrictions or no control | ⚡ **Advanced Role (`-AdvancedMode` / `-ExpertMode`) to unlock Program Files / C:\** |
 | **Failure Localization** | ❌ Raw cryptic error messages (`0x6D9`, `Access Denied`) | 🔍 **Pinpoints: `Where`, `Which`, `Reason`, and actionable `Fix`** |
 | **Rule Collision Prevention** | ❌ Identical executable names overwrite each other | 🔒 **Deterministic FIPS-compliant SHA256 path hashes** |
 
@@ -108,10 +109,11 @@ If you prefer to clone or download the repository locally:
 ```text
 ==============================================================================
          FIREWALL BLOCKER - RECURSIVE WINDOWS FIREWALL MANAGER                
-       Windows 7 / 8 / 8.1 / 10 / 11 | Production Grade | Version 2.4        
+       Windows 7 / 8 / 8.1 / 10 / 11 | Production Grade | Version 2.5        
 ==============================================================================
   Target Root Folder : D:\Games\ActionRPG
   Discovered .EXEs   : 14 executable(s) found
+  User Role / Mode   : STANDARD [SAFE GUARDRAILS ACTIVE]
   Firewall Service   : RUNNING (MpsSvc)
   Admin Privileges   : ELEVATED (Administrator)
 ==============================================================================
@@ -129,6 +131,7 @@ If you prefer to clone or download the repository locally:
    [7]  CHANGE target directory                - Pick or drag-and-drop a new folder
    [8]  OPEN Windows Firewall GUI (wf.msc)     - Inspect native firewall rules
    [9]  RESTART / REPAIR Firewall Service      - Auto-configure & ensure MpsSvc health
+   [A]  TOGGLE ADVANCED / POWER USER MODE      - [DISABLED] Safe Mode
 
    [0]  Exit
 ==============================================================================
@@ -151,7 +154,35 @@ If you prefer to clone or download the repository locally:
 - 🧪 **Dry-Run Audit Mode**: Inspects the firewall status of all executables in a directory without altering rules across multilingual Windows installations.
 - 🧹 **Global Rule Purge**: 1-click cleanup to find and wipe all rules created by FirewallBlocker across your entire machine.
 - 🖲️ **Hardened CMD Batch Fallback**: Standalone CMD batch engine in `FirewallBlocker.bat` with active AppLocker/WDAC/GPO bypass detection, preserved exit codes, and isolated delayed expansion safe against paths containing exclamation marks (`!`).
+- ⚡ **Advanced / Power User Role Override**: Bypass folder restrictions on `C:\Program Files`, `C:\Program Files (x86)`, `C:\ProgramData`, or custom root paths (`C:\`) using `-AdvancedMode` / `-ExpertMode` or interactive toggle `[A]`, while core OS files (`C:\Windows\System32`) remain guarded unless combined with `-Force`.
 - 🛑 **Stdin EOF / Stream Closure Guard**: Safely terminates interactive console menus when standard input reaches EOF or is piped, preventing infinite redraw loops.
+
+---
+
+## ⚡ Advanced / Power User Role (`-AdvancedMode` / `-ExpertMode`)
+
+By default, FirewallBlocker enforces strict safety guardrails preventing accidental modification of system folders. However, power users, game modders, and system administrators often need to apply firewall rules to executables located inside `C:\Program Files`, `C:\Program Files (x86)`, `C:\ProgramData`, or custom directories directly on `C:\`.
+
+FirewallBlocker provides an **Advanced / Power User Role** that unlocks these directories while preserving operating system integrity:
+
+### Key Capabilities & Safety Architecture:
+- 🔓 **Unlocked System Directories**: Bypasses restrictions on `C:\Program Files`, `C:\Program Files (x86)`, `C:\ProgramData`, custom root drives (`C:\`), and Defender/WindowsApps folders.
+- ⚠️ **Explicit Safety Warning & Confirmation**: Interactive console menu requires explicit confirmation before applying rules to overridden system folders; headless non-interactive mode logs prominent safety warnings.
+- 🛡️ **Core OS Stability Protection**: Essential Windows kernel and networking infrastructure (`C:\Windows`, `C:\Windows\System32`, `SysWOW64`, `WinSxS`) remains strictly guarded (`ExitCode 2`) unless explicitly confirmed with `-Force` in expert mode (`-AdvancedMode -Force`).
+- 🔄 **Interactive Menu Toggle**: Press **`[A]`** in the console menu (supported in both the primary PowerShell engine and native Batch fallback) to toggle Advanced Mode on or off with an explicit risk acknowledgment prompt.
+- 🚀 **Seamless UAC Elevation**: Propagates `-AdvancedMode` privileges across Windows User Account Control (UAC) elevation prompts automatically.
+
+### CLI Automation Examples:
+```powershell
+# Scan executables inside Program Files using Advanced Mode
+powershell -ExecutionPolicy Bypass -File .\FirewallBlocker.ps1 -TargetDir "C:\Program Files\Common Files" -Action Scan -AdvancedMode -NonInteractive
+
+# Block Outbound telemetry for an enterprise application inside Program Files (alias: -ExpertMode)
+powershell -ExecutionPolicy Bypass -File .\FirewallBlocker.ps1 -TargetDir "C:\Program Files\EnterpriseApp" -Action BlockOutbound -ExpertMode -NonInteractive
+
+# Block both Inbound & Outbound on a custom C:\ drive path
+powershell -ExecutionPolicy Bypass -File .\FirewallBlocker.ps1 -TargetDir "C:\CustomTools" -Action BlockBoth -AdvancedMode -NonInteractive
+```
 
 ---
 
@@ -206,13 +237,13 @@ powershell -ExecutionPolicy Bypass -File .\FirewallBlocker.ps1 -TargetDir "D:\My
 
 ## 🧪 Verification & Automated Testing
 
-FirewallBlocker includes an automated 23-point test suite in `tests/test_suite.ps1`. To run it locally:
+FirewallBlocker includes an automated 25-point test suite in `tests/test_suite.ps1`. To run it locally:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\test_suite.ps1
 ```
 
-All 23 tests validate:
+All 25 tests validate:
 1. `FirewallBlocker.ps1` AST syntax validity (PS 2.0 to 7.x compatible).
 2. `run.ps1` AST syntax validity.
 3. Byte-for-byte parity between `FirewallBlocker.ps1` and `run.ps1`.
@@ -236,6 +267,8 @@ All 23 tests validate:
 21. Target directory startup defaulting guard (prevents freezing on launch from user profile roots).
 22. Service restart and repair functionality (`Ensure-FirewallServiceRunning -Restart`).
 23. Comprehensive multi-path SHA256 hash parity across simple and complex paths.
+24. Advanced/Power User mode path overrides (`Program Files`, `ProgramData`, drive roots, extended paths) & core OS preservation (`C:\Windows\System32` rejected with `ExitCode 2` without `-Force`).
+25. Native batch fallback engine Advanced Mode argument parsing, menu toggle, core OS protections (`:CORE_OS_ERROR`), and PowerShell delegation.
 
 ---
 

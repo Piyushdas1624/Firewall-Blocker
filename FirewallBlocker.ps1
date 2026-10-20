@@ -33,6 +33,12 @@
 
 .PARAMETER ExportFunctionsOnly
     Loads functions into the caller scope and returns immediately without running the menu or dispatcher.
+
+.PARAMETER AdvancedMode
+    Enables Advanced / Power User mode (aliases: -ExpertMode, -Advanced, -Expert).
+    Bypasses folder restrictions on directories such as Program Files, Program Files (x86),
+    ProgramData, and custom root paths. Core OS files (C:\Windows\System32) remain guarded
+    unless explicitly confirmed with -Force in expert mode.
 #>
 
 [CmdletBinding()]
@@ -53,8 +59,15 @@ param(
     [string]$InitialDir = "",
 
     [Parameter(Mandatory=$false)]
-    [switch]$ExportFunctionsOnly = $false
+    [switch]$ExportFunctionsOnly = $false,
+
+    [Parameter(Mandatory=$false)]
+    [Alias("ExpertMode", "Advanced", "Expert")]
+    [switch]$AdvancedMode = $false
 )
+
+$Script:AdvancedMode = ($AdvancedMode.IsPresent -or ($AdvancedMode -eq $true))
+$Script:Force = ($Force.IsPresent -or ($Force -eq $true))
 
 # ------------------------------------------------------------------------------
 # 1. Environment & TLS 1.2 Setup across all .NET / PowerShell Versions
@@ -150,8 +163,48 @@ function Test-IsAdmin {
     }
 }
 
-function Test-IsProtectedSystemPath {
+function Test-IsCoreSystemPath {
     param([string]$PathToCheck)
+    if ([string]::IsNullOrEmpty($PathToCheck)) { return $true }
+
+    try {
+        $resolved = [System.IO.Path]::GetFullPath($PathToCheck).TrimEnd('\', '/')
+        if ($resolved.StartsWith('\\?\', [System.StringComparison]::OrdinalIgnoreCase)) {
+            $resolved = $resolved.Substring(4).TrimEnd('\', '/')
+        }
+    } catch {
+        return $true
+    }
+
+    # Resolve reparse points / junctions
+    try {
+        $item = Get-Item -LiteralPath $resolved -ErrorAction SilentlyContinue
+        if ($item -and $item.Target) {
+            foreach ($t in @($item.Target)) {
+                if (Test-IsCoreSystemPath -PathToCheck $t) { return $true }
+            }
+        }
+    } catch {}
+
+    $winDir = $env:SystemRoot
+    if ([string]::IsNullOrEmpty($winDir)) { $winDir = $env:windir }
+    if ([string]::IsNullOrEmpty($winDir)) { $winDir = "C:\Windows" }
+    $winDir = $winDir.TrimEnd('\', '/')
+
+    if ($resolved.Equals($winDir, [System.StringComparison]::OrdinalIgnoreCase) -or
+        $resolved.StartsWith($winDir + "\", [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $true
+    }
+
+    return $false
+}
+
+function Test-IsProtectedSystemPath {
+    param(
+        [string]$PathToCheck,
+        [switch]$IsAdvanced = $false,
+        [switch]$IsForce = $false
+    )
     if ([string]::IsNullOrEmpty($PathToCheck)) { return $true }
     
     try {
@@ -164,15 +217,33 @@ function Test-IsProtectedSystemPath {
         return $true
     }
 
+    $effectiveAdvanced = $IsAdvanced -or ($Script:AdvancedMode -eq $true)
+    $effectiveForce = $IsForce -or ($Force -and $Force.IsPresent) -or ($Script:Force -eq $true)
+
     # Also resolve reparse points / junctions
     try {
         $item = Get-Item -LiteralPath $resolved -ErrorAction SilentlyContinue
         if ($item -and $item.Target) {
             foreach ($t in @($item.Target)) {
-                if (Test-IsProtectedSystemPath -PathToCheck $t) { return $true }
+                if (Test-IsProtectedSystemPath -PathToCheck $t -IsAdvanced:$effectiveAdvanced -IsForce:$effectiveForce) { return $true }
             }
         }
     } catch {}
+
+    # Core OS kernel stability protections (C:\Windows, System32, SysWOW64, WinSxS)
+    if (Test-IsCoreSystemPath -PathToCheck $resolved) {
+        if ($effectiveAdvanced -and $effectiveForce) {
+            # Advanced Mode combined with explicit -Force overrides even core Windows OS paths
+            return $false
+        }
+        # In all other cases, core OS remains strictly protected to prevent catastrophic network failure
+        return $true
+    }
+
+    # If Advanced / Power User Mode is active, allow all other paths (Program Files, ProgramData, drive roots, Defender, WindowsApps)
+    if ($effectiveAdvanced) {
+        return $false
+    }
     
     # Safe resolution using environment variables compatible with all Windows versions (Win 7 - 11)
     $winDir = $env:SystemRoot
@@ -382,7 +453,7 @@ function Write-Banner {
     Clear-Host
     Write-Host "==============================================================================" -ForegroundColor Cyan
     Write-Host "         FIREWALL BLOCKER - RECURSIVE WINDOWS FIREWALL MANAGER                " -ForegroundColor White
-    Write-Host "       Windows 7 / 8 / 8.1 / 10 / 11 | Production Grade | Version 2.4        " -ForegroundColor DarkCyan
+    Write-Host "       Windows 7 / 8 / 8.1 / 10 / 11 | Production Grade | Version 2.5        " -ForegroundColor DarkCyan
     Write-Host "==============================================================================" -ForegroundColor Cyan
 }
 
@@ -419,6 +490,8 @@ function Write-StatusCard {
         Write-Host "[NOT SET] - Drag & drop a folder or select Option 7" -ForegroundColor Yellow
     } elseif (Test-IsProtectedSystemPath -PathToCheck $Dir) {
         Write-Host "$Dir [PROTECTED SYSTEM FOLDER - CANNOT BLOCK]" -ForegroundColor Red
+    } elseif ($Script:AdvancedMode -and (Test-IsProtectedSystemPath -PathToCheck $Dir -IsAdvanced:$false)) {
+        Write-Host "$Dir [ADVANCED OVERRIDE ACTIVE]" -ForegroundColor Magenta
     } elseif (Test-IsUserProfileRoot -PathToCheck $Dir) {
         Write-Host "$Dir [USER PROFILE ROOT - SENSITIVE TARGET]" -ForegroundColor Yellow
     } else {
@@ -437,6 +510,13 @@ function Write-StatusCard {
         } else {
             Write-Host "0 executables found" -ForegroundColor DarkGray
         }
+    }
+
+    Write-Host "  User Role / Mode   : " -ForegroundColor Gray -NoNewline
+    if ($Script:AdvancedMode) {
+        Write-Host "ADVANCED / POWER USER [RESTRICTIONS OVERRIDDEN]" -ForegroundColor Yellow
+    } else {
+        Write-Host "STANDARD [SAFE GUARDRAILS ACTIVE]" -ForegroundColor Green
     }
 
     Write-Host "  Firewall Service   : " -ForegroundColor Gray -NoNewline
@@ -465,7 +545,8 @@ function Assert-Elevated {
         [string]$CurrentTargetDir,
         [string]$CurrentAction,
         [switch]$IsNonInteractive,
-        [switch]$Force = $false
+        [switch]$Force = $false,
+        [switch]$AdvancedMode = $false
     )
     if (Test-IsAdmin) { return $true }
 
@@ -487,8 +568,11 @@ function Assert-Elevated {
     if ($IsNonInteractive) {
         $argsToPass += " -NonInteractive"
     }
-    if ($Force) {
+    if ($Force -or $Script:Force) {
         $argsToPass += " -Force"
+    }
+    if ($AdvancedMode -or $Script:AdvancedMode) {
+        $argsToPass += " -AdvancedMode"
     }
 
     # If running from a file on disk
@@ -1005,13 +1089,46 @@ function Invoke-BlockOperation {
         Write-Host "  Directory: $Dir" -ForegroundColor Yellow
         Write-Host "  Blocking Windows system folders will break Windows Networking, Windows Update," -ForegroundColor Red
         Write-Host "  and critical operating system services." -ForegroundColor Red
+        if (-not $Script:AdvancedMode) {
+            Write-Host "  Tip: Advanced / Power User Mode can override restrictions for Program Files," -ForegroundColor Yellow
+            Write-Host "       ProgramData, and custom root paths. (Press 'A' in menu or use -AdvancedMode)." -ForegroundColor Yellow
+        } else {
+            Write-Host "  Core Windows OS paths (e.g. C:\Windows\System32) require -Force in Advanced Mode." -ForegroundColor Yellow
+        }
         Write-Host "  Operation aborted immediately to protect system stability." -ForegroundColor Red
         Write-Host "  ==========================================================================" -ForegroundColor Red
         if (-not $NonInteractive) { Read-Host "`n  Press ENTER to return to menu..."; return $false }
         exit 2
     }
 
-    if (-not (Assert-Elevated -CurrentTargetDir $Dir -CurrentAction "Block$Mode" -IsNonInteractive:$NonInteractive)) {
+    # Check if target is a normally protected path being overridden in Advanced Mode
+    $isOverriddenProtected = $false
+    if ($Script:AdvancedMode -and (Test-IsProtectedSystemPath -PathToCheck $Dir -IsAdvanced:$false)) {
+        $isOverriddenProtected = $true
+    }
+
+    if ($isOverriddenProtected) {
+        Write-Host ""
+        Write-Host "  ==========================================================================" -ForegroundColor Red
+        Write-Host "  [ADVANCED / POWER USER WARNING] SYSTEM DIRECTORY OVERRIDE ACTIVE!         " -ForegroundColor White
+        Write-Host "  ==========================================================================" -ForegroundColor Red
+        Write-Host "  Directory: $Dir" -ForegroundColor Yellow
+        Write-Host "  [!] WARNING: You are operating in Advanced / Power User Mode." -ForegroundColor Yellow
+        Write-Host "      Applying firewall rules to system or application roots may disrupt" -ForegroundColor Yellow
+        Write-Host "      network communication, background services, or application updates." -ForegroundColor Yellow
+        Write-Host "  ==========================================================================" -ForegroundColor Red
+
+        if (-not $NonInteractive -and -not $Force) {
+            $confirmAdv = Read-Host "  Do you understand the risks and want to proceed with blocking? [Y/N]"
+            if ($null -eq $confirmAdv -or $confirmAdv -notmatch '^[Yy]') {
+                Write-Host "  [CANCEL] Block operation aborted by user." -ForegroundColor Yellow
+                Read-Host "`n  Press ENTER to return to menu..."
+                return $true
+            }
+        }
+    }
+
+    if (-not (Assert-Elevated -CurrentTargetDir $Dir -CurrentAction "Block$Mode" -IsNonInteractive:$NonInteractive -Force:$Force -AdvancedMode:$Script:AdvancedMode)) {
         if ($NonInteractive) { exit 1 }
         return $false
     }
@@ -1218,12 +1335,41 @@ function Invoke-UnblockOperation {
         Write-Host "  ==========================================================================" -ForegroundColor Red
         Write-Host "  Directory: $Dir" -ForegroundColor Yellow
         Write-Host "  Operation aborted to protect system stability." -ForegroundColor Red
+        if (-not $Script:AdvancedMode) {
+            Write-Host "  Tip: Advanced / Power User Mode can override restrictions for Program Files," -ForegroundColor Yellow
+            Write-Host "       ProgramData, and custom root paths. (Press 'A' in menu or use -AdvancedMode)." -ForegroundColor Yellow
+        } else {
+            Write-Host "  Core Windows OS paths (e.g. C:\Windows\System32) require -Force in Advanced Mode." -ForegroundColor Yellow
+        }
         Write-Host "  ==========================================================================" -ForegroundColor Red
         if (-not $NonInteractive) { Read-Host "`n  Press ENTER to return to menu..."; return $false }
         exit 2
     }
 
-    if (-not (Assert-Elevated -CurrentTargetDir $Dir -CurrentAction "UnblockDir" -IsNonInteractive:$NonInteractive)) {
+    $isOverriddenProtected = $false
+    if ($Script:AdvancedMode -and (Test-IsProtectedSystemPath -PathToCheck $Dir -IsAdvanced:$false)) {
+        $isOverriddenProtected = $true
+    }
+
+    if ($isOverriddenProtected) {
+        Write-Host ""
+        Write-Host "  ==========================================================================" -ForegroundColor Yellow
+        Write-Host "  [ADVANCED / POWER USER WARNING] SYSTEM DIRECTORY UNBLOCK OVERRIDE ACTIVE! " -ForegroundColor White
+        Write-Host "  ==========================================================================" -ForegroundColor Yellow
+        Write-Host "  Directory: $Dir" -ForegroundColor Yellow
+        Write-Host "  [!] WARNING: Operating in Advanced / Power User Mode." -ForegroundColor Yellow
+        Write-Host "  ==========================================================================" -ForegroundColor Yellow
+        if (-not $NonInteractive -and -not $Force) {
+            $confirmAdv = Read-Host "  Do you want to proceed with removing rules for this system directory? [Y/N]"
+            if ($null -eq $confirmAdv -or $confirmAdv -notmatch '^[Yy]') {
+                Write-Host "  [CANCEL] Unblock operation aborted by user." -ForegroundColor Yellow
+                Read-Host "`n  Press ENTER to return to menu..."
+                return $true
+            }
+        }
+    }
+
+    if (-not (Assert-Elevated -CurrentTargetDir $Dir -CurrentAction "UnblockDir" -IsNonInteractive:$NonInteractive -Force:$Force -AdvancedMode:$Script:AdvancedMode)) {
         if ($NonInteractive) { exit 1 }
         return $false
     }
@@ -1495,6 +1641,9 @@ function Set-NewTargetDirectory {
     if (Test-IsProtectedSystemPath -PathToCheck $cleaned) {
         Write-Host "  [!] WARNING: '$cleaned' is a protected Windows system path." -ForegroundColor Red
         Write-Host "      Blocking system paths will break Windows networking. Please choose a game or app folder." -ForegroundColor Yellow
+        if (-not $Script:AdvancedMode) {
+            Write-Host "      (Tip: Toggle Advanced / Power User Mode [Option A] to override restrictions)." -ForegroundColor DarkYellow
+        }
         Start-Sleep -Seconds 3
         return
     }
@@ -1502,7 +1651,11 @@ function Set-NewTargetDirectory {
     try {
         $Script:CurrentTarget = (Get-Item -LiteralPath $cleaned).FullName
         $Script:CachedExeCount = -1
-        Write-Host "  [OK] Target folder updated successfully." -ForegroundColor Green
+        if ($Script:AdvancedMode -and (Test-IsProtectedSystemPath -PathToCheck $cleaned -IsAdvanced:$false)) {
+            Write-Host "  [OK] Advanced Mode active: System target folder accepted." -ForegroundColor Yellow
+        } else {
+            Write-Host "  [OK] Target folder updated successfully." -ForegroundColor Green
+        }
         Start-Sleep -Seconds 1
     } catch {
         Write-Host "  [FAIL] Invalid path: $($_.Exception.Message)" -ForegroundColor Red
@@ -1603,11 +1756,17 @@ while ($true) {
     Write-Host "- Inspect native firewall rules" -ForegroundColor DarkGray
     Write-Host "   [9]  RESTART / REPAIR Firewall Service      " -ForegroundColor White -NoNewline
     Write-Host "- Auto-configure & ensure MpsSvc health" -ForegroundColor DarkGray
+    Write-Host "   [A]  TOGGLE ADVANCED / POWER USER MODE      " -ForegroundColor White -NoNewline
+    if ($Script:AdvancedMode) {
+        Write-Host "- [ENABLED] Restrictions Overridden" -ForegroundColor Yellow
+    } else {
+        Write-Host "- [DISABLED] Safe Mode" -ForegroundColor DarkGray
+    }
     Write-Host ""
     Write-Host "   [0]  Exit" -ForegroundColor Red
     Write-Host "==============================================================================" -ForegroundColor Cyan
     
-    $choice = Read-Host "  Select an option [0-9]"
+    $choice = Read-Host "  Select an option [0-9, A]"
     if ($null -eq $choice) {
         Write-Host "`n  [EOF] Standard input closed. Exiting FirewallBlocker." -ForegroundColor DarkCyan
         Cleanup-TempElevationScript
@@ -1625,7 +1784,7 @@ while ($true) {
         "8" { Show-FirewallMMC }
         "9" { 
             Write-Host "  [*] Verifying & repairing Windows Defender Firewall Service (MpsSvc)..." -ForegroundColor Cyan
-            if (-not (Assert-Elevated -CurrentTargetDir $Script:CurrentTarget -CurrentAction "RepairService" -IsNonInteractive:$NonInteractive)) {
+            if (-not (Assert-Elevated -CurrentTargetDir $Script:CurrentTarget -CurrentAction "RepairService" -IsNonInteractive:$NonInteractive -AdvancedMode:$Script:AdvancedMode)) {
                 Start-Sleep -Seconds 2
                 continue
             }
@@ -1637,13 +1796,45 @@ while ($true) {
             }
             Start-Sleep -Seconds 2
         }
+        "A" {
+            if ($Script:AdvancedMode) {
+                $Script:AdvancedMode = $false
+                $Script:CachedExeCount = -1
+                Write-Host "`n  [OK] Advanced / Power User Mode DISABLED. Standard safety guardrails active." -ForegroundColor Green
+                Start-Sleep -Seconds 1
+            } else {
+                Write-Host ""
+                Write-Host "  ==========================================================================" -ForegroundColor Red
+                Write-Host "  [CONFIRMATION] ENABLE ADVANCED / POWER USER ROLE                          " -ForegroundColor White
+                Write-Host "  ==========================================================================" -ForegroundColor Red
+                Write-Host "  Enabling Advanced Mode overrides safety restrictions on system folders" -ForegroundColor Yellow
+                Write-Host "  including Program Files, Program Files (x86), ProgramData, and custom" -ForegroundColor Yellow
+                Write-Host "  root directories (C:\)." -ForegroundColor Yellow
+                Write-Host ""
+                Write-Host "  [!] WARNING: Blocking essential software or driver components may" -ForegroundColor Red
+                Write-Host "      degrade network connectivity or application stability." -ForegroundColor Red
+                Write-Host "      Core OS files (C:\Windows\System32) remain guarded unless -Force is used." -ForegroundColor Yellow
+                Write-Host "  ==========================================================================" -ForegroundColor Red
+                Write-Host ""
+                $advConfirm = Read-Host "  Are you sure you want to enable Advanced / Power User Mode? [Y/N]"
+                if ($advConfirm -match '^[Yy]') {
+                    $Script:AdvancedMode = $true
+                    $Script:CachedExeCount = -1
+                    Write-Host "`n  [OK] Advanced / Power User Mode ENABLED. Folder restrictions overridden." -ForegroundColor Yellow
+                    Start-Sleep -Seconds 2
+                } else {
+                    Write-Host "`n  [CANCEL] Advanced Mode not enabled." -ForegroundColor DarkCyan
+                    Start-Sleep -Seconds 1
+                }
+            }
+        }
         "0" { 
             Write-Host "`n  Exiting FirewallBlocker. Goodbye!`n" -ForegroundColor Cyan
             Cleanup-TempElevationScript
             exit 0
         }
         default {
-            Write-Host "  [!] Invalid choice: '$choice'. Please select a number between 0 and 9." -ForegroundColor Yellow
+            Write-Host "  [!] Invalid choice: '$choice'. Please select an option from the menu (0-9, A)." -ForegroundColor Yellow
             Start-Sleep -Seconds 1
         }
     }
