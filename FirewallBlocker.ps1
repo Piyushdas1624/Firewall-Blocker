@@ -92,10 +92,7 @@ $Script:SelfCode = ""
 if ($Script:RunningFromFile) {
     try {
         $Script:SelfCode = [System.IO.File]::ReadAllText($Script:ScriptFilePath, [System.Text.Encoding]::UTF8)
-        # Immediate self-cleanup if running as elevated temp script (parsed into memory, safe to delete)
-        if ($Script:ScriptFilePath -like "*FirewallBlocker_Elevated*.ps1") {
-            try { [System.IO.File]::Delete($Script:ScriptFilePath) } catch {}
-        }
+
     } catch {}
 }
 if (-not (Test-IsRealScriptContent -Code $Script:SelfCode)) {
@@ -119,15 +116,17 @@ if (-not (Test-IsRealScriptContent -Code $Script:SelfCode)) {
 
 function Cleanup-TempElevationScript {
     param([switch]$CleanStaleOnly = $false)
-    # If THIS process is the elevated child running from a temp script, clean it up on exit
-    if ($Script:RunningFromFile -and $Script:ScriptFilePath -and ($Script:ScriptFilePath -like "*FirewallBlocker_Elevated*.ps1")) {
+    # If THIS process is running from a temp elevation script, clean it up directly without child cmd.exe
+    if (-not $CleanStaleOnly -and $Script:ScriptFilePath -and ($Script:ScriptFilePath -like "*FirewallBlocker_Elevated*.ps1")) {
         try {
-            Start-Process -WindowStyle Hidden -FilePath "cmd.exe" -ArgumentList "/c timeout /t 2 >nul & del `"$($Script:ScriptFilePath)`""
+            if ([System.IO.File]::Exists($Script:ScriptFilePath)) {
+                [System.IO.File]::Delete($Script:ScriptFilePath)
+            }
         } catch {
             try { Remove-Item -LiteralPath $Script:ScriptFilePath -Force -ErrorAction SilentlyContinue } catch {}
         }
     }
-    # Only clean old stale scripts (> 5 min old) to avoid deleting in-flight elevation launches
+    # Clean stale elevation temp scripts older than 5 minutes to prevent disk accumulation
     try {
         if (-not [string]::IsNullOrEmpty($env:TEMP) -and (Test-Path -LiteralPath $env:TEMP)) {
             $cutoff = (Get-Date).AddMinutes(-5)
@@ -383,7 +382,7 @@ function Write-Banner {
     Clear-Host
     Write-Host "==============================================================================" -ForegroundColor Cyan
     Write-Host "         FIREWALL BLOCKER - RECURSIVE WINDOWS FIREWALL MANAGER                " -ForegroundColor White
-    Write-Host "       Windows 7 / 8 / 8.1 / 10 / 11 | Production Grade | Version 2.3        " -ForegroundColor DarkCyan
+    Write-Host "       Windows 7 / 8 / 8.1 / 10 / 11 | Production Grade | Version 2.4        " -ForegroundColor DarkCyan
     Write-Host "==============================================================================" -ForegroundColor Cyan
 }
 
@@ -826,17 +825,59 @@ function Get-TargetExecutables {
     }
 }
 
+function Test-NetshRuleBlocked {
+    param(
+        $NetshResult
+    )
+    if ($null -eq $NetshResult) { return $false }
+    if ($NetshResult -is [string]) {
+        $NetshResult = @{ Success = $true; Output = $NetshResult }
+    }
+    if (-not $NetshResult.Success) { return $false }
+    $txt = $NetshResult.Output
+    if ([string]::IsNullOrEmpty($txt)) { return $false }
+
+    # Multilingual token matchers (EN, DE, FR, ES, IT, PT, PL, TR, NL, RU, ZH-Hans, ZH-Hant, JA, KO)
+    $blockActionRegex = '(?i)(?:Action|Aktion|Acci[o\u00F3]n|Azione|A[c\u00E7][a\u00E3]o|Dzia[l\u0142]anie|Eylem|Actie|\u0414\u0435\u0439\u0441\u0442\u0432\u0438\u0435|\u64CD\u4F5C|\u52D5\u4F5C|\uC791\uC5C5|\uB3D9\uC791)[\s:\uFF1A]+(?:Block|Bloqu|Blockier|Blocca|Blok|Zablokuj|Engelle|Blokkeren|\u0411\u043B\u043E\u043A\u0438\u0440|\u963B\u6B62|\u5C01\u9396|\u30D6\u30ED\u30C3\u30AF|\uCC28\uB2E8)'
+    $allowActionRegex = '(?i)(?:Action|Aktion|Acci[o\u00F3]n|Azione|A[c\u00E7][a\u00E3]o|Dzia[l\u0142]anie|Eylem|Actie|\u0414\u0435\u0439\u0441\u0442\u0432\u0438\u0435|\u64CD\u4F5C|\u52D5\u4F5C|\uC791\uC5C5|\uB3D9\uC791)[\s:\uFF1A]+(?:Allow|Zulassen|Autoris|Permit|Consenti|Zezwalaj|Izin|Toestaan|\u0420\u0430\u0437\u0440\u0435\u0448|\u5141\u8BB8|\u5141\u8A31|\u8A31\u53EF|\uD5C8\uC6A9)'
+    $ruleExistsRegex  = '(?i)(?:Rule Name|Regelname|Nom de r[e\u00E8\u00E9]gle|Nombre de regla|Nome regola|Nazwa regu[l\u0142]y|Kural Ad[i\u0131]|Regelnaam|\u0418\u043C\u044F \u043F\u0440\u0430\u0432\u0438\u043B\u0430|\u89C4\u5219\u540D\u79F0|\u898F\u5247\u540D|\uADDC\uCE59\s*\uC774\uB984|Name)[\s:\uFF1A]+'
+    $disabledRegex    = '(?i)(?:Enabled|Aktiviert|Activ[e\u00E9]|Habilitado|Abilitato|W[l\u0142][a\u0105]czone|Etkin|Ingeschakeld|\u0412\u043A\u043B\u044E\u0447\u0435\u043D\u043E|\u5DF2\u542F\u7528|\u5DF2\u555F\u7528|\u6709\u52B9|\uC0AC\uC6A9|\uD65C\uC131\uD654)[\s:\uFF1A]+(?:No|Nein|Non|Nie|Hay[i\u0131]r|Nee|\u041D\u0435\u0442|\u5426|\u3044\u3044\u3048|\uC544\uB2C8\uC694|False|0)'
+
+    if ($txt -match $disabledRegex) { return $false }
+    if ($txt -match $blockActionRegex) { return $true }
+    if ($txt -match $allowActionRegex) { return $false }
+    if ($txt -match $ruleExistsRegex -or ($NetshResult.Success -and $txt.Length -gt 10)) { return $true }
+    return $false
+}
+
 function Test-ExecutableRuleStatus {
     param(
         [string]$ExePath,
-        [string]$ExeName
+        [string]$ExeName,
+        [System.Collections.Generic.HashSet[string]]$CachedRuleNames = $null
     )
     $cleanName = $ExeName.Replace('"', '')
     $hash = Get-PortableHash -InputString $ExePath
     $inRule = "[FWB-IN] $cleanName ($hash)"
     $outRule = "[FWB-OUT] $cleanName ($hash)"
+
+    # 1. High-Performance Cached Mode (Pre-fetched rules from Invoke-ScanAudit)
+    if ($null -ne $CachedRuleNames) {
+        $inBlocked = $CachedRuleNames.Contains($inRule.ToLowerInvariant()) -or
+                     $CachedRuleNames.Contains("[fwb-in] $($cleanName.ToLowerInvariant())") -or
+                     $CachedRuleNames.Contains("[folderblock-in] $($cleanName.ToLowerInvariant())")
+
+        $outBlocked = $CachedRuleNames.Contains($outRule.ToLowerInvariant()) -or
+                      $CachedRuleNames.Contains("[fwb-out] $($cleanName.ToLowerInvariant())") -or
+                      $CachedRuleNames.Contains("[folderblock-out] $($cleanName.ToLowerInvariant())")
+
+        return @{
+            InBlocked  = $inBlocked
+            OutBlocked = $outBlocked
+        }
+    }
     
-    # 1. Prefer language-neutral NetSecurity cmdlets if available (PowerShell 3.0+ / Windows 8+)
+    # 2. Standalone NetSecurity cmdlets if available (PowerShell 3.0+ / Windows 8+)
     $hasNetSecurity = $false
     try {
         if (Get-Command Get-NetFirewallRule -ErrorAction SilentlyContinue) {
@@ -887,49 +928,31 @@ function Test-ExecutableRuleStatus {
         }
     }
 
-    # 2. Netsh Fallback for Windows 7 SP1 / PS 2.0 or environments without NetSecurity
+    # 3. Netsh Fallback for Windows 7 SP1 / PS 2.0 or environments without NetSecurity
     $checkIn = Invoke-Netsh -Arguments "advfirewall firewall show rule name=`"$inRule`""
     $checkOut = Invoke-Netsh -Arguments "advfirewall firewall show rule name=`"$outRule`""
-    
-    # Multilingual token matchers (EN, DE, FR, ES, IT, PT, PL, TR, NL, RU, ZH-Hans, ZH-Hant, JA, KO)
-    $blockActionRegex = '(?i)(?:Action|Aktion|Acci[o\u00F3]n|Azione|A[c\u00E7][a\u00E3]o|Dzia[l\u0142]anie|Eylem|Actie|\u0414\u0435\u0439\u0441\u0442\u0432\u0438\u0435|\u64CD\u4F5C|\u52D5\u4F5C|\uC791\uC5C5|\uB3D9\uC791)[\s:\uFF1A]+(?:Block|Bloqu|Blockier|Blocca|Blok|Zablokuj|Engelle|Blokkeren|\u0411\u043B\u043E\u043A\u0438\u0440|\u963B\u6B62|\u5C01\u9396|\u30D6\u30ED\u30C3\u30AF|\uCC28\uB2E8)'
-    $allowActionRegex = '(?i)(?:Action|Aktion|Acci[o\u00F3]n|Azione|A[c\u00E7][a\u00E3]o|Dzia[l\u0142]anie|Eylem|Actie|\u0414\u0435\u0439\u0441\u0442\u0432\u0438\u0435|\u64CD\u4F5C|\u52D5\u4F5C|\uC791\uC5C5|\uB3D9\uC791)[\s:\uFF1A]+(?:Allow|Zulassen|Autoris|Permit|Consenti|Zezwalaj|Izin|Toestaan|\u0420\u0430\u0437\u0440\u0435\u0448|\u5141\u8BB8|\u5141\u8A31|\u8A31\u53EF|\uD5C8\uC6A9)'
-    $ruleExistsRegex  = '(?i)(?:Rule Name|Regelname|Nom de r[e\u00E8\u00E9]gle|Nombre de regla|Nome regola|Nazwa regu[l\u0142]y|Kural Ad[i\u0131]|Regelnaam|\u0418\u043C\u044F \u043F\u0440\u0430\u0432\u0438\u043B\u0430|\u89C4\u5219\u540D\u79F0|\u898F\u5247\u540D|\uADDC\uCE59\s*\uC774\uB984|Name)[\s:\uFF1A]+'
-    $disabledRegex    = '(?i)(?:Enabled|Aktiviert|Activ[e\u00E9]|Habilitado|Abilitato|W[l\u0142][a\u0105]czone|Etkin|Ingeschakeld|\u0412\u043A\u043B\u044E\u0447\u0435\u043D\u043E|\u5DF2\u542F\u7528|\u5DF2\u555F\u7528|\u6709\u52B9|\uC0AC\uC6A9|\uD65C\uC131\uD654)[\s:\uFF1A]+(?:No|Nein|Non|Nie|Hay[i\u0131]r|Nee|\u041D\u0435\u0442|\u5426|\u3044\u3044\u3048|\uC544\uB2C8\uC694|False|0)'
 
-    $isRuleBlocked = {
-        param($res)
-        if (-not $res.Success) { return $false }
-        $txt = $res.Output
-        if ($txt -match $disabledRegex) { return $false }
-        if ($txt -match $blockActionRegex) { return $true }
-        if ($txt -match $allowActionRegex) { return $false }
-        # Language-neutral existence fallback: if netsh exited 0 and rule name exists, it is a blocked rule created by this tool
-        if ($txt -match $ruleExistsRegex -or ($res.Success -and $txt.Length -gt 10)) { return $true }
-        return $false
-    }
-
-    $inBlocked = (& $isRuleBlocked $checkIn)
-    $outBlocked = (& $isRuleBlocked $checkOut)
+    $inBlocked = Test-NetshRuleBlocked -NetshResult $checkIn
+    $outBlocked = Test-NetshRuleBlocked -NetshResult $checkOut
 
     # Also check batch format rules (without hash)
     if (-not $inBlocked) {
         $batchIn = Invoke-Netsh -Arguments "advfirewall firewall show rule name=`"[FWB-IN] $cleanName`""
-        if (& $isRuleBlocked $batchIn) { $inBlocked = $true }
+        if (Test-NetshRuleBlocked -NetshResult $batchIn) { $inBlocked = $true }
     }
     if (-not $outBlocked) {
         $batchOut = Invoke-Netsh -Arguments "advfirewall firewall show rule name=`"[FWB-OUT] $cleanName`""
-        if (& $isRuleBlocked $batchOut) { $outBlocked = $true }
+        if (Test-NetshRuleBlocked -NetshResult $batchOut) { $outBlocked = $true }
     }
 
     # Also check legacy rule formats
     if (-not $inBlocked) {
         $legacyIn = Invoke-Netsh -Arguments "advfirewall firewall show rule name=`"[FolderBlock-IN] $cleanName`""
-        if (& $isRuleBlocked $legacyIn) { $inBlocked = $true }
+        if (Test-NetshRuleBlocked -NetshResult $legacyIn) { $inBlocked = $true }
     }
     if (-not $outBlocked) {
         $legacyOut = Invoke-Netsh -Arguments "advfirewall firewall show rule name=`"[FolderBlock-OUT] $cleanName`""
-        if (& $isRuleBlocked $legacyOut) { $outBlocked = $true }
+        if (Test-NetshRuleBlocked -NetshResult $legacyOut) { $outBlocked = $true }
     }
 
     return @{
@@ -1374,6 +1397,26 @@ function Invoke-ScanAudit {
 
     Write-Host "  Discovered $($exes.Count) executable file(s):`n" -ForegroundColor Cyan
 
+    # Fast batch pre-fetch of active FirewallBlocker rules (avoids N+1 slow WMI/CIM queries)
+    $activeRulesSet = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    $rulesLoaded = $false
+    try {
+        if (Get-Command Get-NetFirewallRule -ErrorAction SilentlyContinue) {
+            $activeRules = @(Get-NetFirewallRule -DisplayName @('[[]FWB-*', '[[]FolderBlock-*') -ErrorAction SilentlyContinue |
+                Where-Object {
+                    ("$($_.Enabled)" -eq "True" -or $_.Enabled -eq 1 -or $_.Enabled -eq $true) -and
+                    ("$($_.Action)" -eq "Block" -or $_.Action -eq 4 -or $_.Action -eq 2)
+                })
+            foreach ($r in $activeRules) {
+                if ($r.DisplayName) { [void]$activeRulesSet.Add($r.DisplayName.ToLowerInvariant()) }
+                if ($r.Name) { [void]$activeRulesSet.Add($r.Name.ToLowerInvariant()) }
+            }
+            $rulesLoaded = $true
+        }
+    } catch {
+        $rulesLoaded = $false
+    }
+
     $count = 0
     $blockedBoth = 0
     $blockedInOnly = 0
@@ -1382,7 +1425,11 @@ function Invoke-ScanAudit {
 
     foreach ($exe in $exes) {
         $count++
-        $status = Test-ExecutableRuleStatus -ExePath $exe.FullName -ExeName $exe.Name
+        $status = if ($rulesLoaded) {
+            Test-ExecutableRuleStatus -ExePath $exe.FullName -ExeName $exe.Name -CachedRuleNames $activeRulesSet
+        } else {
+            Test-ExecutableRuleStatus -ExePath $exe.FullName -ExeName $exe.Name
+        }
         
         $sizeMB = $exe.Length / 1MB
 
@@ -1515,7 +1562,7 @@ if (-not [string]::IsNullOrEmpty($Action)) {
         "UnblockDir"     { $actionSuccess = Invoke-UnblockOperation -Dir $Script:CurrentTarget }
         "UnblockAll"     { $actionSuccess = Invoke-UnblockAllSystem }
         "Scan"           { $actionSuccess = Invoke-ScanAudit -Dir $Script:CurrentTarget }
-        "RepairService"  { $actionSuccess = Ensure-FirewallServiceRunning }
+        "RepairService"  { $actionSuccess = Ensure-FirewallServiceRunning -Restart }
     }
 
     if ($NonInteractive) {

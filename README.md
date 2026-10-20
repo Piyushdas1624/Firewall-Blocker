@@ -11,7 +11,7 @@
 
 <p align="center">
   <a href="https://github.com/Piyushdas1624/Firewall-Blocker"><img src="https://img.shields.io/badge/GitHub-Piyushdas1624%2FFirewall--Blocker-181717?style=flat-square&logo=github" alt="GitHub Repository"></a>
-  <img src="https://img.shields.io/badge/Version-2.3-ef4444?style=flat-square" alt="Version 2.3">
+  <img src="https://img.shields.io/badge/Version-2.4-ef4444?style=flat-square" alt="Version 2.4">
   <img src="https://img.shields.io/badge/Tests-23%2F23%20Passing-10b981?style=flat-square" alt="Tests">
   <img src="https://img.shields.io/badge/Platform-Windows%207%20SP1%20%7C%208%20%7C%208.1%20%7C%2010%20%7C%2011%20%7C%20Server-0ea5e9?style=flat-square&logo=windows" alt="Platform">
   <img src="https://img.shields.io/badge/PowerShell-2.0%20to%207.x%2B-2563eb?style=flat-square&logo=powershell&logoColor=white" alt="PowerShell 2.0+">
@@ -85,7 +85,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager
 For corporate environments or security-conscious users where unpinned remote scripts are restricted:
 ```powershell
 # Pin execution to an audited immutable commit hash:
-irm https://raw.githubusercontent.com/Piyushdas1624/Firewall-Blocker/5beff57/run.ps1 | iex
+irm https://raw.githubusercontent.com/Piyushdas1624/Firewall-Blocker/5c61433/run.ps1 | iex
 ```
 
 ---
@@ -108,7 +108,7 @@ If you prefer to clone or download the repository locally:
 ```text
 ==============================================================================
          FIREWALL BLOCKER - RECURSIVE WINDOWS FIREWALL MANAGER                
-       Windows 7 / 8 / 8.1 / 10 / 11 | Production Grade | Version 2.3        
+       Windows 7 / 8 / 8.1 / 10 / 11 | Production Grade | Version 2.4        
 ==============================================================================
   Target Root Folder : D:\Games\ActionRPG
   Discovered .EXEs   : 14 executable(s) found

@@ -8,7 +8,7 @@ $blockerBat = Join-Path $repoRoot "FirewallBlocker.bat"
 $textBat = Join-Path $repoRoot "text.bat"
 
 Write-Host "====================================================" -ForegroundColor Cyan
-Write-Host "Running FirewallBlocker Automated Test Suite v2.3" -ForegroundColor White
+Write-Host "Running FirewallBlocker Automated Test Suite v2.4" -ForegroundColor White
 Write-Host "====================================================" -ForegroundColor Cyan
 
 $testDirsToCleanup = New-Object System.Collections.ArrayList
@@ -345,25 +345,11 @@ echo !RULE_HASH!
     }
 
     # -------------------------------------------------------------------------
-    # Test 13: Multilingual Netsh Output Rule Status Parsing
+    # -------------------------------------------------------------------------
+    # Test 13: Multilingual Netsh Output Rule Status Parsing (Direct Blocker Call)
     # -------------------------------------------------------------------------
     Write-Host "`n[Test 13] Verifying Multilingual Netsh Rule Parsing..." -ForegroundColor Yellow
     
-    $blockActionRegex = '(?i)(?:Action|Aktion|Acci[o\u00F3]n|Azione|A[c\u00E7][a\u00E3]o|\u0414\u0435\u0439\u0441\u0442\u0432\u0438\u0435|\u64CD\u4F5C|\u52D5\u4F5C|\uC791\uC5C5|\uB3D9\uC791)[\s:\uFF1A]+(?:Block|Bloqu|Blockier|Blocca|\u0411\u043B\u043E\u043A\u0438\u0440|\u963B\u6B62|\u5C01\u9396|\u30D6\u30ED\u30C3\u30AF|\uCC28\uB2E8)'
-    $allowActionRegex = '(?i)(?:Action|Aktion|Acci[o\u00F3]n|Azione|A[c\u00E7][a\u00E3]o|\u0414\u0435\u0439\u0441\u0442\u0432\u0438\u0435|\u64CD\u4F5C|\u52D5\u4F5C|\uC791\uC5C5|\uB3D9\uC791)[\s:\uFF1A]+(?:Allow|Zulassen|Autoris|Permit|Consenti|\u0420\u0430\u0437\u0440\u0435\u0448|\u5141\u8BB8|\u5141\u8A31|\u8A31\u53EF|\uD5C8\uC6A9)'
-    $ruleExistsRegex  = '(?i)(?:Rule Name|Regelname|Nom de r[e\u00E8\u00E9]gle|Nombre de regla|Nome regola|\u0418\u043C\u044F \u043F\u0440\u0430\u0432\u0438\u043B\u0430|\u89C4\u5219\u540D\u79F0|\u898F\u5247\u540D|\uADDC\uCE59\s*\uC774\uB984|Name)[\s:\uFF1A]+'
-    $disabledRegex    = '(?i)(?:Enabled|Aktiviert|Activ[e\u00E9]|Habilitado|Abilitato|\u0412\u043A\u043B\u044E\u0447\u0435\u043D\u043E|\u5DF2\u542F\u7528|\u5DF2\u555F\u7528|\u6709\u52B9|\uC0AC\uC6A9|\uD65C\uC131\uD654)[\s:\uFF1A]+(?:No|Nein|Non|No|\u041D\u0435\u0442|\u5426|\u3044\u3044\u3048|\uC544\uB2C8\uC694)'
-
-    $evalRule = {
-        param([string]$outText, [bool]$success = $true)
-        if (-not $success) { return $false }
-        if ($outText -match $disabledRegex) { return $false }
-        if ($outText -match $blockActionRegex) { return $true }
-        if ($outText -match $allowActionRegex) { return $false }
-        if ($outText -match $ruleExistsRegex) { return $true }
-        return $false
-    }
-
     $samples = @{
         "DE_Block"       = "Regelname: [FWB-IN] game.exe`nAktiviert: Ja`nAktion: Blockieren"
         "FR_Block"       = ("Nom de r" + ([char]0x00E8) + "gle: [FWB-IN] game.exe`nActiv" + ([char]0x00E9) + ": Oui`nAction: Bloquer")
@@ -379,7 +365,7 @@ echo !RULE_HASH!
 
     $allPassed = $true
     foreach ($k in $samples.Keys) {
-        $res = & $evalRule $samples[$k] $true
+        $res = Test-NetshRuleBlocked -NetshResult $samples[$k]
         $expected = (-not $k.Contains("Disabled") -and -not $k.Contains("Allow"))
         if ($res -ne $expected) {
             Write-Host "  -> FAIL: Sample $k evaluated to $res, expected $expected" -ForegroundColor Red
@@ -388,7 +374,7 @@ echo !RULE_HASH!
     }
 
     if ($allPassed) {
-        Write-Host "  -> PASS: Multilingual netsh rule parser verified across German, French, Spanish, Russian, Chinese, Japanese, and Korean." -ForegroundColor Green
+        Write-Host "  -> PASS: Multilingual netsh rule parser verified across German, French, Spanish, Russian, Chinese, Japanese, and Korean via Test-NetshRuleBlocked." -ForegroundColor Green
     } else {
         exit 1
     }
@@ -630,7 +616,7 @@ if ([string]::IsNullOrEmpty(`$TargetDir)) { exit 0 } else { exit 43 }
     $pathsToVerify = @{
         "c:\games\app.exe" = "B42ACF78"
         "C:\Games & Tools (2024)\CrashReporter!.exe" = "8C422CDA"
-        "C:\MyFolder\App(x86).exe" = (Get-PortableHash -InputString "C:\MyFolder\App(x86).exe")
+        "C:\MyFolder\App(x86).exe" = "169D7E51"
     }
 
     $allHashesMatch = $true

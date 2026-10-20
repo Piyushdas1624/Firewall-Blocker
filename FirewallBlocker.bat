@@ -1,7 +1,7 @@
 @echo off
 setlocal DisableDelayedExpansion
 chcp 65001 >nul 2>&1
-title FirewallBlocker - Windows Firewall Manager (Win 7 - 11) v2.3
+title FirewallBlocker - Windows Firewall Manager (Win 7 - 11) v2.4
 
 :: -----------------------------------------------------------------------------
 :: Resolve script location and default target directory
@@ -169,7 +169,7 @@ echo  Operation aborted immediately to protect system stability.
 echo ==============================================================================
 pause
 set "TARGET_DIR="
-goto MENU
+exit /b 1
 
 :CHANGE_DIR
 cls
@@ -318,7 +318,7 @@ for /r "%TARGET_DIR%" %%F in (*.exe) do (
         for %%A in (a b c d e f g h i j k l m n o p q r s t u v w x y z) do (
             set "LOWER_PATH=!LOWER_PATH:%%A=%%A!"
         )
-        set "TMP_H=%TEMP%\_fwb_%RANDOM%.tmp"
+        set "TMP_H=%TEMP%\_fwb_%RANDOM%_%RANDOM%.tmp"
         <nul set /p="!LOWER_PATH!">"!TMP_H!" 2>nul
         for /f "skip=1 delims=" %%H in ('certutil -hashfile "!TMP_H!" SHA256 2^>nul') do (
             if not defined RULE_HASH (
@@ -432,7 +432,7 @@ for /r "%TARGET_DIR%" %%F in (*.exe) do (
         for %%A in (a b c d e f g h i j k l m n o p q r s t u v w x y z) do (
             set "LOWER_PATH=!LOWER_PATH:%%A=%%A!"
         )
-        set "TMP_H=%TEMP%\_fwb_%RANDOM%.tmp"
+        set "TMP_H=%TEMP%\_fwb_%RANDOM%_%RANDOM%.tmp"
         <nul set /p="!LOWER_PATH!">"!TMP_H!" 2>nul
         for /f "skip=1 delims=" %%H in ('certutil -hashfile "!TMP_H!" SHA256 2^>nul') do (
             if not defined RULE_HASH (
