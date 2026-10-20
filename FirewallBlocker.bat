@@ -367,43 +367,46 @@ for /r "%TARGET_DIR%" %%F in (*.exe) do (
 )
 if %PRE_COUNT% gtr 100 set "IS_SENSITIVE=1"
 
-if "%IS_SENSITIVE%"=="1" (
-    cls
-    echo ==============================================================================
-    echo  [CONFIRMATION REQUIRED] POTENTIALLY SENSITIVE OR LARGE TARGET!
-    echo ==============================================================================
-    echo  Directory: "%TARGET_DIR%"
-    echo  Discovered executables: %PRE_COUNT%
-    if defined USERPROFILE if /i "%TARGET_DIR%"=="%USERPROFILE%" (
-        echo  [!] Warning: Target is a User Profile directory.
-        echo      Blocking this will affect AppData, Local, and Desktop applications.
-    )
-    if %PRE_COUNT% gtr 100 (
-        echo  [!] Warning: Target contains over 100 executables.
-    )
-    echo ==============================================================================
-    echo.
-    set "CONFIRM="
-    set /p "CONFIRM=Are you SURE you want to block all %PRE_COUNT% executable(s)? [Y/N]: "
-    if not defined CONFIRM goto CANCEL_BLOCK
-    if /i not "%CONFIRM:"=%"=="Y" goto CANCEL_BLOCK
+if not "%IS_SENSITIVE%"=="1" goto SKIP_SENSITIVE_CONFIRM
+cls
+echo ==============================================================================
+echo  [CONFIRMATION REQUIRED] POTENTIALLY SENSITIVE OR LARGE TARGET!
+echo ==============================================================================
+echo  Directory: "%TARGET_DIR%"
+echo  Discovered executables: %PRE_COUNT%
+if defined USERPROFILE if /i "%TARGET_DIR%"=="%USERPROFILE%" (
+    echo  [!] Warning: Target is a User Profile directory.
+    echo      Blocking this will affect AppData, Local, and Desktop applications.
 )
+if %PRE_COUNT% gtr 100 (
+    echo  [!] Warning: Target contains over 100 executables.
+)
+echo ==============================================================================
+echo.
+set "CONFIRM="
+set /p "CONFIRM=Are you SURE you want to block all %PRE_COUNT% executable(s)? [Y/N]: "
+if not defined CONFIRM goto CANCEL_BLOCK
+set "CONFIRM=%CONFIRM:"=%"
+set "CONFIRM=%CONFIRM: =%"
+if /i not "%CONFIRM%"=="Y" goto CANCEL_BLOCK
 
-if "%IS_SYSTEM_OVERRIDDEN%"=="1" (
-    cls
-    echo ==============================================================================
-    echo  [ADVANCED / POWER USER WARNING] SYSTEM DIRECTORY OVERRIDE ACTIVE!
-    echo ==============================================================================
-    echo  Directory: "%TARGET_DIR%"
-    echo  [!] WARNING: Operating in Advanced Mode. Modifying system folder rules
-    echo      can affect application communications or system services.
-    echo ==============================================================================
-    echo.
-    set "CONFIRM_ADV="
-    set /p "CONFIRM_ADV=Do you want to proceed with applying rules to this folder? [Y/N]: "
-    if not defined CONFIRM_ADV goto CANCEL_BLOCK
-    if /i not "%CONFIRM_ADV:"=%"=="Y" goto CANCEL_BLOCK
-)
+:SKIP_SENSITIVE_CONFIRM
+if not "%IS_SYSTEM_OVERRIDDEN%"=="1" goto DO_BLOCK
+cls
+echo ==============================================================================
+echo  [ADVANCED / POWER USER WARNING] SYSTEM DIRECTORY OVERRIDE ACTIVE!
+echo ==============================================================================
+echo  Directory: "%TARGET_DIR%"
+echo  [!] WARNING: Operating in Advanced Mode. Modifying system folder rules
+echo      can affect application communications or system services.
+echo ==============================================================================
+echo.
+set "CONFIRM_ADV="
+set /p "CONFIRM_ADV=Do you want to proceed with applying rules to this folder? [Y/N]: "
+if not defined CONFIRM_ADV goto CANCEL_BLOCK
+set "CONFIRM_ADV=%CONFIRM_ADV:"=%"
+set "CONFIRM_ADV=%CONFIRM_ADV: =%"
+if /i not "%CONFIRM_ADV%"=="Y" goto CANCEL_BLOCK
 goto DO_BLOCK
 
 :CANCEL_BLOCK
@@ -468,14 +471,14 @@ for /r "%TARGET_DIR%" %%F in (*.exe) do (
             netsh advfirewall firewall delete rule name="[FolderBlock-IN] !EXE_NAME!" program="!EXE_PATH!" >nul 2>&1
             netsh advfirewall firewall delete rule name="[FolderBlock-OUT] !EXE_NAME!" program="!EXE_PATH!" >nul 2>&1
 
-            netsh advfirewall firewall add rule name="!IN_RULE!" dir=in action=block program="!EXE_PATH!" enable=yes profile=any description="Blocked by FirewallBlocker | !EXE_PATH!" >nul 2>&1
+            netsh advfirewall firewall add rule name="!IN_RULE!" dir=in action=block program="!EXE_PATH!" enable=yes profile=any description="Blocked by FirewallBlocker - !EXE_PATH!" >nul 2>&1
             if !errorlevel! equ 0 (
                 echo       [OK] Inbound Block Added
             ) else (
                 echo       [FAIL] Inbound Block Failed
             )
 
-            netsh advfirewall firewall add rule name="!OUT_RULE!" dir=out action=block program="!EXE_PATH!" enable=yes profile=any description="Blocked by FirewallBlocker | !EXE_PATH!" >nul 2>&1
+            netsh advfirewall firewall add rule name="!OUT_RULE!" dir=out action=block program="!EXE_PATH!" enable=yes profile=any description="Blocked by FirewallBlocker - !EXE_PATH!" >nul 2>&1
             if !errorlevel! equ 0 (
                 echo       [OK] Outbound Block Added
             ) else (
@@ -488,7 +491,7 @@ for /r "%TARGET_DIR%" %%F in (*.exe) do (
             netsh advfirewall firewall delete rule name="[FWB-OUT] !EXE_NAME!" program="!EXE_PATH!" >nul 2>&1
             netsh advfirewall firewall delete rule name="[FolderBlock-OUT] !EXE_NAME!" program="!EXE_PATH!" >nul 2>&1
 
-            netsh advfirewall firewall add rule name="!OUT_RULE!" dir=out action=block program="!EXE_PATH!" enable=yes profile=any description="Blocked by FirewallBlocker | !EXE_PATH!" >nul 2>&1
+            netsh advfirewall firewall add rule name="!OUT_RULE!" dir=out action=block program="!EXE_PATH!" enable=yes profile=any description="Blocked by FirewallBlocker - !EXE_PATH!" >nul 2>&1
             if !errorlevel! equ 0 (
                 echo       [OK] Outbound Block Added
             ) else (
@@ -501,7 +504,7 @@ for /r "%TARGET_DIR%" %%F in (*.exe) do (
             netsh advfirewall firewall delete rule name="[FWB-IN] !EXE_NAME!" program="!EXE_PATH!" >nul 2>&1
             netsh advfirewall firewall delete rule name="[FolderBlock-IN] !EXE_NAME!" program="!EXE_PATH!" >nul 2>&1
 
-            netsh advfirewall firewall add rule name="!IN_RULE!" dir=in action=block program="!EXE_PATH!" enable=yes profile=any description="Blocked by FirewallBlocker | !EXE_PATH!" >nul 2>&1
+            netsh advfirewall firewall add rule name="!IN_RULE!" dir=in action=block program="!EXE_PATH!" enable=yes profile=any description="Blocked by FirewallBlocker - !EXE_PATH!" >nul 2>&1
             if !errorlevel! equ 0 (
                 echo       [OK] Inbound Block Added
             ) else (
@@ -527,20 +530,21 @@ if not defined TARGET_DIR call :CHECK_DIR_SET
 call :CHECK_PROTECTED
 if not defined TARGET_DIR goto MENU
 
-if "%IS_SYSTEM_OVERRIDDEN%"=="1" (
-    cls
-    echo ==============================================================================
-    echo  [ADVANCED / POWER USER WARNING] SYSTEM DIRECTORY UNBLOCK OVERRIDE ACTIVE!
-    echo ==============================================================================
-    echo  Directory: "%TARGET_DIR%"
-    echo  [!] WARNING: Operating in Advanced / Power User Mode.
-    echo ==============================================================================
-    echo.
-    set "CONFIRM_ADV_UNB="
-    set /p "CONFIRM_ADV_UNB=Do you want to proceed with removing rules for this system directory? [Y/N]: "
-    if not defined CONFIRM_ADV_UNB goto CANCEL_UNBLOCK
-    if /i not "%CONFIRM_ADV_UNB:"=%"=="Y" goto CANCEL_UNBLOCK
-)
+if not "%IS_SYSTEM_OVERRIDDEN%"=="1" goto UNBLOCK_EXES
+cls
+echo ==============================================================================
+echo  [ADVANCED / POWER USER WARNING] SYSTEM DIRECTORY UNBLOCK OVERRIDE ACTIVE!
+echo ==============================================================================
+echo  Directory: "%TARGET_DIR%"
+echo  [!] WARNING: Operating in Advanced / Power User Mode.
+echo ==============================================================================
+echo.
+set "CONFIRM_ADV_UNB="
+set /p "CONFIRM_ADV_UNB=Do you want to proceed with removing rules for this system directory? [Y/N]: "
+if not defined CONFIRM_ADV_UNB goto CANCEL_UNBLOCK
+set "CONFIRM_ADV_UNB=%CONFIRM_ADV_UNB:"=%"
+set "CONFIRM_ADV_UNB=%CONFIRM_ADV_UNB: =%"
+if /i not "%CONFIRM_ADV_UNB%"=="Y" goto CANCEL_UNBLOCK
 goto UNBLOCK_EXES
 
 :CANCEL_UNBLOCK

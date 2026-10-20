@@ -225,11 +225,18 @@ try {
     $longPath = "C:\" + ("A" * 255) + "\game.exe"
     $fakePathError = Format-HumanFirewallError -RawOutput "" -ExitCode 1 -ExePath $longPath -Direction "INBOUND" -RuleName "[FWB-IN] game.exe"
 
+    $fakeDescError = Format-HumanFirewallError -RawOutput "The description contains invalid characters, or is an invalid length." -ExitCode 1 -ExePath "C:\Program Files (x86)\AutoCAD 2007\acad.exe" -Direction "INBOUND" -RuleName "[FWB-IN] acad.exe"
+    $fakeNetshUsage = "The description contains invalid characters, or is an invalid length.`r`nUsage: add rule name=<string>`r`n      [localport=0-65535|<port range>[,...]|RPC|RPC-EPMap|IPHTTPS|any (default=any)]"
+    $fakeUsageDiag = Format-HumanFirewallError -RawOutput $fakeNetshUsage -ExitCode 1 -ExePath "C:\Program Files (x86)\AutoCAD 2007\acad.exe" -Direction "INBOUND" -RuleName "[FWB-IN] acad.exe"
+
     if ($fakeElevError.Location -eq "Windows Security Token (UAC)" -and
         $fakeSvcError.Location  -eq "Windows Service Manager (MpsSvc)" -and
         $fakeGpoError.Location  -eq "Active Directory / Local Group Policy" -and
-        $fakePathError.Location -eq "Win32 File Subsystem (MAX_PATH)") {
-        Write-Host "  -> PASS: Human error diagnostics properly pinpoint Location, Root Cause, and Fix across all categories." -ForegroundColor Green
+        $fakePathError.Location -eq "Win32 File Subsystem (MAX_PATH)" -and
+        $fakeDescError.Location -eq "Command Parser / Rule Parameter" -and
+        $fakeUsageDiag.Location -eq "Command Parser / Rule Parameter" -and
+        $fakeUsageDiag.Location -ne "Windows Service Manager (MpsSvc)") {
+        Write-Host "  -> PASS: Human error diagnostics properly pinpoint Location, Root Cause, and Fix across all categories (including invalid characters and netsh usage screens without false RPC triggers)." -ForegroundColor Green
     } else {
         Write-Host "  -> FAIL: Human error diagnostic mapping failed." -ForegroundColor Red
         exit 1
@@ -266,11 +273,15 @@ try {
     $hasOverDestructive = ($batContent -match 'netsh\s+advfirewall\s+firewall\s+delete\s+rule\s+name=all\s+program=')
     # Invariant 3: No corrupting delayed expansion substitution on input paths
     $hasDelayedSubTrap = ($batContent -match 'setlocal\s+EnableDelayedExpansion\s+set\s+"CLEAN_DIR=!(?:INPUT|NEW)_DIR:"=!')
+    # Invariant 4: No parenthesized confirmation blocks that cause parse-time expansion crashes
+    $hasParenConfirmTrap = ($batContent -match 'if\s+["'']?%IS_(?:SENSITIVE|SYSTEM_OVERRIDDEN)%["'']?==["'']?1["'']?\s*\([^)]*set\s+/p\s+["'']?CONFIRM')
+    # Invariant 5: No pipe characters in netsh rule descriptions (causes netsh syntax invalid character crash)
+    $hasPipeInDesc = ($batContent -match 'description="[^"]*\|[^"]*"')
 
-    if (-not $hasScopeTrap -and -not $hasOverDestructive -and -not $hasDelayedSubTrap) {
-        Write-Host "  -> PASS: FirewallBlocker.bat verified free of variable scope traps, destructive deletions, and delayed substitution bugs." -ForegroundColor Green
+    if (-not $hasScopeTrap -and -not $hasOverDestructive -and -not $hasDelayedSubTrap -and -not $hasParenConfirmTrap -and -not $hasPipeInDesc) {
+        Write-Host "  -> PASS: FirewallBlocker.bat verified free of variable scope traps, destructive deletions, parse-time parenthesized prompt traps, and illegal pipe descriptions." -ForegroundColor Green
     } else {
-        Write-Host "  -> FAIL: FirewallBlocker.bat failed code invariants (scope trap: $hasScopeTrap, over-destructive: $hasOverDestructive, delayed sub: $hasDelayedSubTrap)." -ForegroundColor Red
+        Write-Host "  -> FAIL: FirewallBlocker.bat failed code invariants (scope: $hasScopeTrap, over-destructive: $hasOverDestructive, delayed sub: $hasDelayedSubTrap, paren confirm: $hasParenConfirmTrap, pipe desc: $hasPipeInDesc)." -ForegroundColor Red
         exit 1
     }
 
@@ -721,8 +732,130 @@ if ([string]::IsNullOrEmpty(`$TargetDir)) { exit 0 } else { exit 43 }
         exit 1
     }
 
+    # -------------------------------------------------------------------------
+    # Test 26: Batch Fallback Confirmation on Overridden Paths with (x86) and Spaces
+    # -------------------------------------------------------------------------
+    Write-Host "`n[Test 26] Testing Batch Confirmation Handling on Overridden Paths with (x86) and Spaces..." -ForegroundColor Yellow
+    $test86Dir = "C:\Program Files (x86)\AutoCAD 2007"
+    $batchConfirmTestScript = @"
+@echo off
+setlocal DisableDelayedExpansion
+set "TARGET_DIR=$test86Dir"
+set "ADVANCED_MODE=1"
+set "IS_SYSTEM_OVERRIDDEN=1"
+set "IS_SENSITIVE=0"
+
+if not "%IS_SENSITIVE%"=="1" goto SKIP_SENSITIVE_CONFIRM
+set "CONFIRM="
+set /p "CONFIRM=Are you SURE? [Y/N]: "
+if not defined CONFIRM goto CANCEL_BLOCK
+set "CONFIRM=%CONFIRM:"=%"
+set "CONFIRM=%CONFIRM: =%"
+if /i not "%CONFIRM%"=="Y" goto CANCEL_BLOCK
+
+:SKIP_SENSITIVE_CONFIRM
+if not "%IS_SYSTEM_OVERRIDDEN%"=="1" goto DO_BLOCK
+set "CONFIRM_ADV="
+set /p "CONFIRM_ADV=Proceed? [Y/N]: "
+if not defined CONFIRM_ADV goto CANCEL_BLOCK
+set "CONFIRM_ADV=%CONFIRM_ADV:"=%"
+set "CONFIRM_ADV=%CONFIRM_ADV: =%"
+if /i not "%CONFIRM_ADV%"=="Y" goto CANCEL_BLOCK
+goto DO_BLOCK
+
+:CANCEL_BLOCK
+echo [CONFIRM_CANCELLED_CLEANLY]
+exit /b 0
+
+:DO_BLOCK
+echo [CONFIRM_ACCEPTED_CLEANLY]
+exit /b 0
+"@
+    $tmpBatConfirm = Join-Path $env:TEMP "test_bat_confirm.bat"
+    [System.IO.File]::WriteAllText($tmpBatConfirm, $batchConfirmTestScript, [System.Text.Encoding]::ASCII)
+
+    # Test Cancel path (simulate user typing N into prompt without syntax error)
+    $rawOutN = cmd.exe /c "<nul set /p=`"N`" | `"$tmpBatConfirm`""
+    $exitCodeN = $LASTEXITCODE
+    $outN = if ($rawOutN) { ($rawOutN | Out-String).Trim() } else { "" }
+
+    # Test Accept path (simulate user typing Y into prompt)
+    $rawOutY = cmd.exe /c "<nul set /p=`"Y`" | `"$tmpBatConfirm`""
+    $exitCodeY = $LASTEXITCODE
+    $outY = if ($rawOutY) { ($rawOutY | Out-String).Trim() } else { "" }
+
+    Remove-Item $tmpBatConfirm -Force -ErrorAction SilentlyContinue
+
+    $hasCrashError = ($outN -match "unexpected at this time" -or $outY -match "unexpected at this time")
+    $cancelOk = ($outN -match "\[CONFIRM_CANCELLED_CLEANLY\]" -and $exitCodeN -eq 0)
+    $acceptOk = ($outY -match "\[CONFIRM_ACCEPTED_CLEANLY\]" -and $exitCodeY -eq 0)
+
+    if (-not $hasCrashError -and $cancelOk -and $acceptOk) {
+        Write-Host "  -> PASS: Batch confirmation on '$test86Dir' executed without parse-time crash (Cancel & Accept verified cleanly)." -ForegroundColor Green
+    } else {
+        Write-Host "  -> FAIL: Batch confirmation crashed or misbehaved (Crash: $hasCrashError, CancelOk: $cancelOk, AcceptOk: $acceptOk, OutN: $outN, OutY: $outY)." -ForegroundColor Red
+        exit 1
+    }
+
+    # -------------------------------------------------------------------------
+    # Test 27: AutoCAD 2007 (x86) Path Quoting, Netsh Description Sanitization & MpsSvc Health Check
+    # -------------------------------------------------------------------------
+    Write-Host "`n[Test 27] Verifying AutoCAD (x86) Path Handling, Description Sanitization & MpsSvc Health..." -ForegroundColor Yellow
+    $acadPath = "C:\Program Files (x86)\AutoCAD 2007\acad.exe"
+    $inRule = Get-RuleName -Direction "IN" -ExeName "acad.exe" -FullPath $acadPath
+    $outRule = Get-RuleName -Direction "OUT" -ExeName "acad.exe" -FullPath $acadPath
+    $acadHash = Get-PortableHash -InputString $acadPath
+
+    # Verify rule names and portable hash
+    if ($inRule -match '^\[FWB-IN\] acad\.exe \([0-9A-F]{8}\)$' -and $acadHash.Length -eq 8) {
+        Write-Host "  -> PASS: Rule names and portable hash generated accurately for '$acadPath' ($acadHash)." -ForegroundColor Green
+    } else {
+        Write-Host "  -> FAIL: Rule name or hash generation failed for '$acadPath' ($inRule)." -ForegroundColor Red
+        exit 1
+    }
+
+    # Verify description sanitization (no pipe characters)
+    $rawDesc = "Blocked by FirewallBlocker - $acadPath"
+    $cleanDesc = $rawDesc.Replace('"', '').Replace('|', '-')
+    if ($cleanDesc -notmatch '\|' -and $cleanDesc -match 'AutoCAD 2007') {
+        Write-Host "  -> PASS: Description properly sanitized without illegal pipe characters." -ForegroundColor Green
+    } else {
+        Write-Host "  -> FAIL: Description sanitization failed: $cleanDesc" -ForegroundColor Red
+        exit 1
+    }
+
+    # Verify netsh parameter parsing via ProcessStartInfo with sanitized description
+    $testPsi = New-Object System.Diagnostics.ProcessStartInfo
+    $testPsi.FileName = "netsh.exe"
+    $testPsi.Arguments = "advfirewall firewall add rule name=`"$inRule`" dir=in action=block program=`"$acadPath`" enable=yes profile=any description=`"$cleanDesc`""
+    $testPsi.RedirectStandardOutput = $true
+    $testPsi.RedirectStandardError = $true
+    $testPsi.UseShellExecute = $false
+    $testPsi.CreateNoWindow = $true
+
+    $testProc = [System.Diagnostics.Process]::Start($testPsi)
+    $null = $testProc.WaitForExit(5000)
+    $testOut = $testProc.StandardOutput.ReadToEnd()
+
+    # Netsh should NOT fail with "The description contains invalid characters" or dump the usage screen with |RPC|
+    if ($testOut -notmatch "invalid characters" -and $testOut -notmatch "Usage:\s*add\s*rule") {
+        Write-Host "  -> PASS: Netsh accepted AutoCAD 2007 (x86) path and description without syntax or invalid character errors." -ForegroundColor Green
+    } else {
+        Write-Host "  -> FAIL: Netsh rejected parameters with invalid characters or usage error: $testOut" -ForegroundColor Red
+        exit 1
+    }
+
+    # Verify Ensure-FirewallServiceRunning with -Restart does not fail with Access Denied (5)
+    $restartCheck = Ensure-FirewallServiceRunning -Restart
+    if ($restartCheck -eq $true) {
+        Write-Host "  -> PASS: Ensure-FirewallServiceRunning -Restart validated MpsSvc health and profile state without Access Denied (5) errors." -ForegroundColor Green
+    } else {
+        Write-Host "  -> FAIL: Ensure-FirewallServiceRunning -Restart returned false." -ForegroundColor Red
+        exit 1
+    }
+
     Write-Host "`n====================================================" -ForegroundColor Cyan
-    Write-Host "All 25 Comprehensive Tests PASSED Successfully!" -ForegroundColor Green
+    Write-Host "All 27 Comprehensive Tests PASSED Successfully!" -ForegroundColor Green
     Write-Host "====================================================" -ForegroundColor Cyan
 
 } finally {

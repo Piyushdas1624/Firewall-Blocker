@@ -682,17 +682,31 @@ function Test-FirewallService {
 function Ensure-FirewallServiceRunning {
     param([switch]$Restart = $false)
     $svcInfo = Test-FirewallService
-    if ($svcInfo.Running -and -not $Restart) { return $true }
 
-    if ($Restart) {
-        Write-Host ""
-        Write-Host "  [*] Verifying and restarting Windows Defender Firewall service (MpsSvc)..." -ForegroundColor Cyan
-    } else {
-        Write-Host ""
-        Write-Host "  [!] WARNING: Windows Defender Firewall service (MpsSvc) is $($svcInfo.Status)." -ForegroundColor Yellow
-        Write-Host "      Windows cannot create or enforce firewall rules while this service is stopped." -ForegroundColor DarkYellow
-        Write-Host ""
+    if ($svcInfo.Running) {
+        if ($Restart) {
+            Write-Host ""
+            Write-Host "  [*] Windows Defender Firewall service (MpsSvc) is currently RUNNING." -ForegroundColor Cyan
+            Write-Host "  [*] Verifying firewall profile responsiveness and RPC communications..." -ForegroundColor Cyan
+            $profRes = Invoke-Netsh -Arguments "advfirewall show allprofiles"
+            if ($profRes.Success) {
+                Write-Host "  [OK] Windows Defender Firewall service (MpsSvc) is ACTIVE and RUNNING." -ForegroundColor Green
+                Write-Host "  [OK] Firewall profiles are responsive and RPC communication is functional." -ForegroundColor Green
+                Write-Host "  [i] Note: Under Windows service hardening, running MpsSvc is protected against stopping." -ForegroundColor DarkGray
+                return $true
+            } else {
+                Write-Host "  [!] Warning: Service is marked running, but profile query returned non-zero code." -ForegroundColor Yellow
+                Write-Host "      Details: $($profRes.Output)" -ForegroundColor DarkYellow
+                return $false
+            }
+        }
+        return $true
     }
+
+    Write-Host ""
+    Write-Host "  [!] WARNING: Windows Defender Firewall service (MpsSvc) is $($svcInfo.Status)." -ForegroundColor Yellow
+    Write-Host "      Windows cannot create or enforce firewall rules while this service is stopped." -ForegroundColor DarkYellow
+    Write-Host ""
     
     if (-not (Test-IsAdmin)) {
         Write-Host "  [!] Administrator privileges are required to configure and start MpsSvc." -ForegroundColor Red
@@ -704,32 +718,38 @@ function Ensure-FirewallServiceRunning {
     if ($NonInteractive -or $Restart) {
         $choice = "Y"
     } else {
-        $choice = Read-Host "  Would you like to automatically configure and start Windows Firewall service now? [Y/N]"
+        $choice = Read-Host "  Would you like to automatically start Windows Firewall service now? [Y/N]"
     }
 
     if ($choice -match '^[Yy]') {
-        Write-Host "  [*] Configuring MpsSvc to Automatic startup and starting..." -ForegroundColor Cyan
+        Write-Host "  [*] Starting Windows Defender Firewall service (MpsSvc)..." -ForegroundColor Cyan
         try {
-            # Use sc.exe config for universal compatibility across Win 7 - 11 even if Disabled
-            $pConfig = Start-Process -FilePath "sc.exe" -ArgumentList "config MpsSvc start= auto" -NoNewWindow -Wait -PassThru
-            if ($Restart) {
-                Write-Host "  [*] Stopping MpsSvc service..." -ForegroundColor Cyan
-                $pStop = Start-Process -FilePath "sc.exe" -ArgumentList "stop MpsSvc" -NoNewWindow -Wait -PassThru
-                Start-Sleep -Seconds 1
-            }
-            Write-Host "  [*] Starting MpsSvc service..." -ForegroundColor Cyan
-            $pStart = Start-Process -FilePath "sc.exe" -ArgumentList "start MpsSvc" -NoNewWindow -Wait -PassThru
-            Start-Sleep -Seconds 2
-            $newSvc = Get-Service -Name MpsSvc -ErrorAction SilentlyContinue
-            if ($newSvc -and $newSvc.Status -eq [System.ServiceProcess.ServiceControllerStatus]::Running) {
-                Write-Host "  [OK] Windows Defender Firewall service is now ACTIVE and RUNNING." -ForegroundColor Green
-                return $true
-            } else {
-                Write-Host "  [FAIL] Failed to start service (sc config: $($pConfig.ExitCode), sc start: $($pStart.ExitCode))." -ForegroundColor Red
-                return $false
-            }
-        } catch {
-            Write-Host "  [FAIL] Failed to start service: $($_.Exception.Message)" -ForegroundColor Red
+            Start-Service -Name MpsSvc -ErrorAction SilentlyContinue
+        } catch {}
+
+        $newSvc = Get-Service -Name MpsSvc -ErrorAction SilentlyContinue
+        if (-not $newSvc -or $newSvc.Status -ne [System.ServiceProcess.ServiceControllerStatus]::Running) {
+            Write-Host "  [*] Retrying service startup via 'net.exe start MpsSvc'..." -ForegroundColor Cyan
+            $null = Start-Process -FilePath "net.exe" -ArgumentList "start MpsSvc" -NoNewWindow -Wait -PassThru
+        }
+
+        $newSvc = Get-Service -Name MpsSvc -ErrorAction SilentlyContinue
+        if (-not $newSvc -or $newSvc.Status -ne [System.ServiceProcess.ServiceControllerStatus]::Running) {
+            $null = Start-Process -FilePath "sc.exe" -ArgumentList "start MpsSvc" -NoNewWindow -Wait -PassThru
+        }
+
+        try {
+            Set-Service -Name MpsSvc -StartupType Automatic -ErrorAction SilentlyContinue
+        } catch {}
+
+        Start-Sleep -Seconds 2
+        $finalSvc = Get-Service -Name MpsSvc -ErrorAction SilentlyContinue
+        if ($finalSvc -and $finalSvc.Status -eq [System.ServiceProcess.ServiceControllerStatus]::Running) {
+            Write-Host "  [OK] Windows Defender Firewall service is now ACTIVE and RUNNING." -ForegroundColor Green
+            return $true
+        } else {
+            Write-Host "  [FAIL] Failed to start Windows Defender Firewall service (MpsSvc)." -ForegroundColor Red
+            Write-Host "  [i] Please open 'services.msc' as Administrator to inspect service health." -ForegroundColor Yellow
             return $false
         }
     }
@@ -865,7 +885,11 @@ function Format-HumanFirewallError {
         $diagnosis.Location = "Windows Security Token (UAC)"
         $diagnosis.RootCause = "Administrator privileges were lost, revoked, or denied."
         $diagnosis.ActionableFix = "Right-click PowerShell or Terminal and select 'Run as administrator'."
-    } elseif ($RawOutput -match "(?i)(contact the Windows Firewall service|service has not been started|Dienst wurde nicht gestartet|n'a pas [e\u00E9]t[e\u00E9] d[e\u00E9]marr|no se ha iniciado el servicio|\u0421\u043B\u0443\u0436\u0431\u0430 \u043D\u0435 \u0437\u0430\u043F\u0443\u0449\u0435\u043D\u0430|\u670D\u52A1\u672A\u542F\u52A8|0x6D9|1753|RPC)") {
+    } elseif ($RawOutput -match "(?i)(invalid characters|invalid length|description contains invalid)") {
+        $diagnosis.Location = "Command Parser / Rule Parameter"
+        $diagnosis.RootCause = "Netsh rejected rule parameters: The description or rule name contains invalid characters (e.g. '|') or invalid length."
+        $diagnosis.ActionableFix = "Ensure rule description and names do not contain special characters like '|'."
+    } elseif ($RawOutput -match "(?i)(contact the Windows Firewall service|service has not been started|Dienst wurde nicht gestartet|n'a pas [e\u00E9]t[e\u00E9] d[e\u00E9]marr|no se ha iniciado el servicio|\u0421\u043B\u0443\u0436\u0431\u0430 \u043D\u0435 \u0437\u0430\u043F\u0443\u0449\u0435\u043D\u0430|\u670D\u52A1\u672A\u542F\u52A8|0x6D9|1753|\bRPC\s*(?:server|service|endpoint|unavailable|is unavailable|call|error|failed)|\brpc\s+is\s+unavailable\b|0x6BA\b)") {
         $diagnosis.Location = "Windows Service Manager (MpsSvc)"
         $diagnosis.RootCause = "The Windows Defender Firewall service (MpsSvc) is stopped, disabled, or RPC is unreachable."
         $diagnosis.ActionableFix = "Press [9] in the menu or run 'services.msc' and start the 'Windows Defender Firewall' service."
@@ -877,10 +901,15 @@ function Format-HumanFirewallError {
         $diagnosis.Location = "Win32 File Subsystem (MAX_PATH)"
         $diagnosis.RootCause = "The executable file path ($($ExePath.Length) chars) approaches or exceeds the Windows 260-character MAX_PATH limit."
         $diagnosis.ActionableFix = "Move the target folder to a shorter path (e.g. C:\Games) or enable Win32 Long Paths in Windows."
-    } elseif ($RawOutput -match "(?i)(parameter is incorrect|syntax of the command)") {
+    } elseif ($RawOutput -match "(?i)(parameter is incorrect|syntax of the command|The following command was not found|Usage:\s*add\s*rule)") {
         $diagnosis.Location = "Command Parser"
-        $diagnosis.RootCause = "The executable path contains unsupported characters or unbalanced formatting."
-        $diagnosis.ActionableFix = "Ensure the directory name does not contain illegal special characters."
+        $firstErr = ($RawOutput -split "[\r\n]+" | Where-Object { $_.Trim().Length -gt 0 -and $_ -notmatch '(?i)^\s*Usage:' } | Select-Object -First 1)
+        if ($firstErr) {
+            $diagnosis.RootCause = "Netsh syntax error: $firstErr"
+        } else {
+            $diagnosis.RootCause = "The executable path contains unsupported characters or unbalanced formatting."
+        }
+        $diagnosis.ActionableFix = "Ensure the directory name and executable path do not contain illegal characters."
     } else {
         $diagnosis.RootCause = "netsh exited with non-zero code ($ExitCode): $RawOutput"
     }
@@ -1240,7 +1269,9 @@ function Invoke-BlockOperation {
 
         $inRuleName = Get-RuleName -Direction "IN" -ExeName $exeName -FullPath $exePath
         $outRuleName = Get-RuleName -Direction "OUT" -ExeName $exeName -FullPath $exePath
-        $desc = "Blocked by FirewallBlocker | $exePath"
+        $cleanExePath = $exePath.Trim('"', "'")
+        $desc = ("Blocked by FirewallBlocker - " + $cleanExePath).Replace('"', '').Replace('|', '-')
+        if ($desc.Length -gt 500) { $desc = $desc.Substring(0, 500) }
 
         Write-Host ("  [{0,3}/{1,-3}] {2}" -f $processedCount, $exes.Count, $exeName) -ForegroundColor White
         Write-Host "          Path: $exePath" -ForegroundColor DarkGray
@@ -1267,6 +1298,12 @@ function Invoke-BlockOperation {
                 Write-Host "[FAIL]" -ForegroundColor Red
                 Write-Host "              Where  : $($diag.Location)" -ForegroundColor Yellow
                 Write-Host "              Reason : $($diag.RootCause)" -ForegroundColor Red
+                if (-not [string]::IsNullOrEmpty($diag.RawMessage)) {
+                    $firstLine = ($diag.RawMessage -split "[\r\n]+" | Where-Object { $_.Trim().Length -gt 0 -and $_ -notmatch '(?i)^\s*(?:Usage|Remarks|Examples):' } | Select-Object -First 1)
+                    if ($firstLine) {
+                        Write-Host "              Output : $firstLine" -ForegroundColor DarkGray
+                    }
+                }
                 Write-Host "              Fix    : $($diag.ActionableFix)" -ForegroundColor DarkYellow
             }
         }
@@ -1293,6 +1330,12 @@ function Invoke-BlockOperation {
                 Write-Host "[FAIL]" -ForegroundColor Red
                 Write-Host "              Where  : $($diag.Location)" -ForegroundColor Yellow
                 Write-Host "              Reason : $($diag.RootCause)" -ForegroundColor Red
+                if (-not [string]::IsNullOrEmpty($diag.RawMessage)) {
+                    $firstLine = ($diag.RawMessage -split "[\r\n]+" | Where-Object { $_.Trim().Length -gt 0 -and $_ -notmatch '(?i)^\s*(?:Usage|Remarks|Examples):' } | Select-Object -First 1)
+                    if ($firstLine) {
+                        Write-Host "              Output : $firstLine" -ForegroundColor DarkGray
+                    }
+                }
                 Write-Host "              Fix    : $($diag.ActionableFix)" -ForegroundColor DarkYellow
             }
         }
