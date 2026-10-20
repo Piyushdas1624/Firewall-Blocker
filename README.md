@@ -76,7 +76,7 @@ powershell -nop -ep bypass -c "[Net.ServicePointManager]::SecurityProtocol=3072;
 ### 4. Command Prompt (`cmd.exe`)
 Paste directly into an ordinary Command Prompt window:
 ```cmd
-powershell -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol=3072; iex (irm 'https://raw.githubusercontent.com/Piyushdas1624/Firewall-Blocker/main/run.ps1')"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol=3072; iex ((New-Object Net.WebClient).DownloadString('https://raw.githubusercontent.com/Piyushdas1624/Firewall-Blocker/main/run.ps1'))"
 ```
 
 ---
