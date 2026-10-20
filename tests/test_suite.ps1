@@ -656,7 +656,18 @@ if ([string]::IsNullOrEmpty(`$TargetDir)) { exit 0 } else { exit 43 }
         exit 1
     }
 
-    # 2. Core OS Stability Protection (C:\Windows, System32) MUST remain protected in Advanced Mode without -Force
+    # 2. Verify explicit -IsAdvanced:$false override works even when $Script:AdvancedMode = $true
+    $Script:AdvancedMode = $true
+    $advPfNormallyProtected = (Test-IsProtectedSystemPath -PathToCheck "C:\Program Files" -IsAdvanced:$false)
+    $Script:AdvancedMode = $false
+    if ($advPfNormallyProtected) {
+        Write-Host "  -> PASS: Test-IsProtectedSystemPath correctly honors explicit -IsAdvanced:`$false when AdvancedMode is active." -ForegroundColor Green
+    } else {
+        Write-Host "  -> FAIL: Test-IsProtectedSystemPath failed to honor -IsAdvanced:`$false parameter binding." -ForegroundColor Red
+        exit 1
+    }
+
+    # 3. Core OS Stability Protection (C:\Windows, System32) MUST remain protected in Advanced Mode without -Force
     $advWinBlocked      = Test-IsProtectedSystemPath -PathToCheck "C:\Windows" -IsAdvanced
     $advSys32Blocked    = Test-IsProtectedSystemPath -PathToCheck "C:\Windows\System32" -IsAdvanced
     $advSys32Forced     = -not (Test-IsProtectedSystemPath -PathToCheck "C:\Windows\System32" -IsAdvanced -IsForce)
@@ -668,15 +679,16 @@ if ([string]::IsNullOrEmpty(`$TargetDir)) { exit 0 } else { exit 43 }
         exit 1
     }
 
-    # 3. CLI execution of -AdvancedMode and -ExpertMode on Program Files
+    # 4. CLI execution of -AdvancedMode and -ExpertMode on Program Files and Core OS
     $advScanProc = Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$blockerPs1`" -TargetDir `"C:\Program Files`" -Action Scan -AdvancedMode -NonInteractive" -NoNewWindow -Wait -PassThru
     $expertScanProc = Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$blockerPs1`" -TargetDir `"C:\Program Files`" -Action Scan -ExpertMode -NonInteractive" -NoNewWindow -Wait -PassThru
     $coreOsProc = Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$blockerPs1`" -TargetDir `"C:\Windows\System32`" -Action BlockBoth -AdvancedMode -NonInteractive" -NoNewWindow -Wait -PassThru
+    $nonForceAdvProc = Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$blockerPs1`" -TargetDir `"C:\Program Files`" -Action BlockBoth -AdvancedMode -NonInteractive" -NoNewWindow -Wait -PassThru
 
-    if ($advScanProc.ExitCode -eq 0 -and $expertScanProc.ExitCode -eq 0 -and $coreOsProc.ExitCode -eq 2) {
-        Write-Host "  -> PASS: -AdvancedMode and -ExpertMode CLI switches permitted target execution on Program Files (ExitCode 0), while core OS System32 was guarded (ExitCode 2)." -ForegroundColor Green
+    if ($advScanProc.ExitCode -eq 0 -and $expertScanProc.ExitCode -eq 0 -and $coreOsProc.ExitCode -eq 2 -and $nonForceAdvProc.ExitCode -eq 1) {
+        Write-Host "  -> PASS: -AdvancedMode switches permitted scan (ExitCode 0), core OS System32 was guarded (ExitCode 2), and non-interactive block on overridden path without -Force safely aborted (ExitCode 1)." -ForegroundColor Green
     } else {
-        Write-Host "  -> FAIL: CLI execution check failed (AdvScan: $($advScanProc.ExitCode), ExpertScan: $($expertScanProc.ExitCode), CoreOS: $($coreOsProc.ExitCode))." -ForegroundColor Red
+        Write-Host "  -> FAIL: CLI execution check failed (AdvScan: $($advScanProc.ExitCode), ExpertScan: $($expertScanProc.ExitCode), CoreOS: $($coreOsProc.ExitCode), NonForceAdv: $($nonForceAdvProc.ExitCode))." -ForegroundColor Red
         exit 1
     }
 
@@ -688,13 +700,15 @@ if ([string]::IsNullOrEmpty(`$TargetDir)) { exit 0 } else { exit 43 }
 
     $hasBatAdvArg     = ($batCode -match '(?i)-AdvancedMode')
     $hasBatExpertArg  = ($batCode -match '(?i)-ExpertMode')
+    $hasBatForceArg   = ($batCode -match '(?i)-Force')
     $hasBatToggle     = ($batCode -match '(?i):TOGGLE_ADVANCED')
     $hasBatCoreOsErr  = ($batCode -match '(?i):CORE_OS_ERROR')
+    $hasBatMatchProt  = ($batCode -match '(?i):MATCH_PROTECTED')
 
-    if ($hasBatAdvArg -and $hasBatExpertArg -and $hasBatToggle -and $hasBatCoreOsErr) {
-        Write-Host "  -> PASS: FirewallBlocker.bat verified with -AdvancedMode argument detection, menu toggle, and core OS protection." -ForegroundColor Green
+    if ($hasBatAdvArg -and $hasBatExpertArg -and $hasBatForceArg -and $hasBatToggle -and $hasBatCoreOsErr -and $hasBatMatchProt) {
+        Write-Host "  -> PASS: FirewallBlocker.bat verified with -AdvancedMode argument detection, -Force detection, menu toggle, and core OS protection." -ForegroundColor Green
     } else {
-        Write-Host "  -> FAIL: Batch Advanced Mode verification failed (Arg: $hasBatAdvArg, ExpertArg: $hasBatExpertArg, Toggle: $hasBatToggle, CoreOS: $hasBatCoreOsErr)." -ForegroundColor Red
+        Write-Host "  -> FAIL: Batch Advanced Mode verification failed (Arg: $hasBatAdvArg, ExpertArg: $hasBatExpertArg, Force: $hasBatForceArg, Toggle: $hasBatToggle, CoreOS: $hasBatCoreOsErr, MatchProt: $hasBatMatchProt)." -ForegroundColor Red
         exit 1
     }
 

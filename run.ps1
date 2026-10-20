@@ -217,8 +217,15 @@ function Test-IsProtectedSystemPath {
         return $true
     }
 
-    $effectiveAdvanced = $IsAdvanced -or ($Script:AdvancedMode -eq $true)
-    $effectiveForce = $IsForce -or ($Force -and $Force.IsPresent) -or ($Script:Force -eq $true)
+    $effectiveAdvanced = [bool]$Script:AdvancedMode
+    if ($PSBoundParameters.ContainsKey('IsAdvanced')) {
+        $effectiveAdvanced = [bool]$IsAdvanced
+    }
+
+    $effectiveForce = ($Force -and $Force.IsPresent) -or ($Script:Force -eq $true)
+    if ($PSBoundParameters.ContainsKey('IsForce')) {
+        $effectiveForce = [bool]$IsForce
+    }
 
     # Also resolve reparse points / junctions
     try {
@@ -463,7 +470,7 @@ $Script:CachedExeCount = -1
 
 function Get-CachedExecutableCount {
     param([string]$Dir)
-    if ([string]::IsNullOrEmpty($Dir) -or -not (Test-Path -LiteralPath $Dir) -or (Test-IsProtectedSystemPath -PathToCheck $Dir) -or (Test-IsUserProfileRoot -PathToCheck $Dir)) {
+    if ([string]::IsNullOrEmpty($Dir) -or -not (Test-Path -LiteralPath $Dir) -or (Test-IsProtectedSystemPath -PathToCheck $Dir) -or (Test-IsUserProfileRoot -PathToCheck $Dir) -or ($Dir -match '^[A-Za-z]:[\\/]?$')) {
         return 0
     }
     if ($Script:CachedDir -eq $Dir -and $Script:CachedExeCount -ge 0) {
@@ -501,6 +508,8 @@ function Write-StatusCard {
     Write-Host "  Discovered .EXEs   : " -ForegroundColor Gray -NoNewline
     if ([string]::IsNullOrEmpty($Dir) -or (Test-IsProtectedSystemPath -PathToCheck $Dir)) {
         Write-Host "None (Select target folder first)" -ForegroundColor DarkGray
+    } elseif ($Dir -match '^[A-Za-z]:[\\/]?$') {
+        Write-Host "Drive root (Press 6 to audit or scan)" -ForegroundColor Yellow
     } elseif (Test-IsUserProfileRoot -PathToCheck $Dir) {
         Write-Host "User profile root (Press 6 to audit or 7 to change)" -ForegroundColor Yellow
     } else {
@@ -1118,12 +1127,20 @@ function Invoke-BlockOperation {
         Write-Host "      network communication, background services, or application updates." -ForegroundColor Yellow
         Write-Host "  ==========================================================================" -ForegroundColor Red
 
-        if (-not $NonInteractive -and -not $Force) {
-            $confirmAdv = Read-Host "  Do you understand the risks and want to proceed with blocking? [Y/N]"
-            if ($null -eq $confirmAdv -or $confirmAdv -notmatch '^[Yy]') {
-                Write-Host "  [CANCEL] Block operation aborted by user." -ForegroundColor Yellow
-                Read-Host "`n  Press ENTER to return to menu..."
-                return $true
+        if ($NonInteractive) {
+            if (-not $Force) {
+                Write-Host "  [ABORT] Blocking an overridden system directory in NonInteractive mode requires -Force." -ForegroundColor Red
+                Cleanup-TempElevationScript
+                exit 1
+            }
+        } else {
+            if (-not $Force) {
+                $confirmAdv = Read-Host "  Do you understand the risks and want to proceed with blocking? [Y/N]"
+                if ($null -eq $confirmAdv -or $confirmAdv -notmatch '^[Yy]') {
+                    Write-Host "  [CANCEL] Block operation aborted by user." -ForegroundColor Yellow
+                    Read-Host "`n  Press ENTER to return to menu..."
+                    return $true
+                }
             }
         }
     }
@@ -1449,7 +1466,7 @@ function Invoke-UnblockOperation {
 }
 
 function Invoke-UnblockAllSystem {
-    if (-not (Assert-Elevated -CurrentAction "UnblockAll" -IsNonInteractive:$NonInteractive -Force:$Force)) {
+    if (-not (Assert-Elevated -CurrentAction "UnblockAll" -IsNonInteractive:$NonInteractive -Force:$Force -AdvancedMode:$Script:AdvancedMode)) {
         if ($NonInteractive) { exit 1 }
         return $false
     }
@@ -1643,6 +1660,8 @@ function Set-NewTargetDirectory {
         Write-Host "      Blocking system paths will break Windows networking. Please choose a game or app folder." -ForegroundColor Yellow
         if (-not $Script:AdvancedMode) {
             Write-Host "      (Tip: Toggle Advanced / Power User Mode [Option A] to override restrictions)." -ForegroundColor DarkYellow
+        } else {
+            Write-Host "      (Core Windows OS paths such as System32 require launching with -Force in Advanced Mode)." -ForegroundColor DarkYellow
         }
         Start-Sleep -Seconds 3
         return

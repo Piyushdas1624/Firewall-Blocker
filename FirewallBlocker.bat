@@ -41,6 +41,7 @@ if %errorlevel% neq 0 (
 )
 
 set "ADVANCED_MODE=0"
+set "FORCE_MODE=0"
 for %%A in (%*) do (
     if /i "%%~A"=="-AdvancedMode" set "ADVANCED_MODE=1"
     if /i "%%~A"=="/AdvancedMode" set "ADVANCED_MODE=1"
@@ -50,9 +51,13 @@ for %%A in (%*) do (
     if /i "%%~A"=="/Advanced" set "ADVANCED_MODE=1"
     if /i "%%~A"=="-Expert" set "ADVANCED_MODE=1"
     if /i "%%~A"=="/Expert" set "ADVANCED_MODE=1"
+    if /i "%%~A"=="-Force" set "FORCE_MODE=1"
+    if /i "%%~A"=="/Force" set "FORCE_MODE=1"
 )
 
 set "TARGET_DIR=%SCRIPT_DIR%"
+if /i "%~1"=="-TargetDir" if not "%~2"=="" if exist "%~2" for %%I in ("%~2") do set "TARGET_DIR=%%~fI"
+if /i "%~1"=="/TargetDir" if not "%~2"=="" if exist "%~2" for %%I in ("%~2") do set "TARGET_DIR=%%~fI"
 if not "%~1"=="" if exist "%~1" (
     for %%I in ("%~1") do set "TARGET_DIR=%%~fI"
 )
@@ -174,50 +179,68 @@ set "CHK_DIR=%TARGET_DIR%"
 if "%CHK_DIR:~0,4%"=="\\?\" set "CHK_DIR=%CHK_DIR:~4%"
 if "%CHK_DIR:~-1%"=="\" set "CHK_DIR=%CHK_DIR:~0,-1%"
 
-:: Core Windows OS kernel stability protection (Always blocked)
+:: Core Windows OS kernel stability protection (Always blocked unless Advanced Mode with -Force)
 set "TD_SLASH=%CHK_DIR%\"
 call set "TD_SUB=%%TD_SLASH:%SystemRoot%\=%%"
-if not "%TD_SUB%"=="%TD_SLASH%" goto CORE_OS_ERROR
-if /i "%CHK_DIR%"=="%SystemRoot%" goto CORE_OS_ERROR
+if not "%TD_SUB%"=="%TD_SLASH%" (
+    if "%ADVANCED_MODE%"=="1" if "%FORCE_MODE%"=="1" (
+        set "IS_SYSTEM_OVERRIDDEN=1"
+        exit /b 0
+    )
+    goto CORE_OS_ERROR
+)
+if /i "%CHK_DIR%"=="%SystemRoot%" (
+    if "%ADVANCED_MODE%"=="1" if "%FORCE_MODE%"=="1" (
+        set "IS_SYSTEM_OVERRIDDEN=1"
+        exit /b 0
+    )
+    goto CORE_OS_ERROR
+)
 
-:: In Advanced / Power User mode, bypass Program Files, ProgramData, drive roots, and Defender
-if "%ADVANCED_MODE%"=="1" exit /b 0
+set "IS_SYSTEM_OVERRIDDEN=0"
 
 :: Standard Mode protections:
 :: Check root drive (e.g. C: or C:\)
-if "%CHK_DIR:~1,2%"==":\" if "%CHK_DIR:~3%"=="" goto PROTECTED_ERROR
-if "%CHK_DIR:~1,1%"==":" if "%CHK_DIR:~2%"=="" goto PROTECTED_ERROR
+if "%CHK_DIR:~1,2%"==":\" if "%CHK_DIR:~3%"=="" goto MATCH_PROTECTED
+if "%CHK_DIR:~1,1%"==":" if "%CHK_DIR:~2%"=="" goto MATCH_PROTECTED
 
 :: Check Program Files & Program Files (x86) root directory directly
-if /i "%CHK_DIR%"=="%ProgramFiles%" goto PROTECTED_ERROR
+if /i "%CHK_DIR%"=="%ProgramFiles%" goto MATCH_PROTECTED
 if defined ProgramFiles(x86) (
-    if /i "%CHK_DIR%"=="%ProgramFiles(x86)%" goto PROTECTED_ERROR
+    if /i "%CHK_DIR%"=="%ProgramFiles(x86)%" goto MATCH_PROTECTED
 )
 
 :: Check ProgramData root directory directly and Defender folders
 if defined ProgramData (
-    if /i "%CHK_DIR%"=="%ProgramData%" goto PROTECTED_ERROR
+    if /i "%CHK_DIR%"=="%ProgramData%" goto MATCH_PROTECTED
     call set "TD_DEF_DATA=%%TD_SLASH:%ProgramData%\Microsoft\Windows Defender\=%%"
-    if not "%TD_DEF_DATA%"=="%TD_SLASH%" goto PROTECTED_ERROR
+    if not "%TD_DEF_DATA%"=="%TD_SLASH%" goto MATCH_PROTECTED
     call set "TD_DEF_DATA2=%%TD_SLASH:%ProgramData%\Microsoft\Windows Defender Advanced Threat Protection\=%%"
-    if not "%TD_DEF_DATA2%"=="%TD_SLASH%" goto PROTECTED_ERROR
+    if not "%TD_DEF_DATA2%"=="%TD_SLASH%" goto MATCH_PROTECTED
 )
 
 :: Check Defender in Program Files / Program Files (x86)
 call set "TD_DEF_PF=%%TD_SLASH:%ProgramFiles%\Windows Defender\=%%"
-if not "%TD_DEF_PF%"=="%TD_SLASH%" goto PROTECTED_ERROR
+if not "%TD_DEF_PF%"=="%TD_SLASH%" goto MATCH_PROTECTED
 if defined ProgramFiles(x86) (
     call set "TD_DEF_PF86=%%TD_SLASH:%ProgramFiles(x86)%\Windows Defender\=%%"
-    if not "%TD_DEF_PF86%"=="%TD_SLASH%" goto PROTECTED_ERROR
+    if not "%TD_DEF_PF86%"=="%TD_SLASH%" goto MATCH_PROTECTED
 )
 
 :: Check LocalAppData Microsoft\WindowsApps (Windows Store execution aliases)
 if defined LOCALAPPDATA (
     call set "TD_WINAPPS=%%TD_SLASH:%LOCALAPPDATA%\Microsoft\WindowsApps\=%%"
-    if not "%TD_WINAPPS%"=="%TD_SLASH%" goto PROTECTED_ERROR
-    if /i "%CHK_DIR%"=="%LOCALAPPDATA%\Microsoft\WindowsApps" goto PROTECTED_ERROR
+    if not "%TD_WINAPPS%"=="%TD_SLASH%" goto MATCH_PROTECTED
+    if /i "%CHK_DIR%"=="%LOCALAPPDATA%\Microsoft\WindowsApps" goto MATCH_PROTECTED
 )
 exit /b 0
+
+:MATCH_PROTECTED
+if "%ADVANCED_MODE%"=="1" (
+    set "IS_SYSTEM_OVERRIDDEN=1"
+    exit /b 0
+)
+goto PROTECTED_ERROR
 
 :CORE_OS_ERROR
 cls
@@ -261,7 +284,11 @@ for %%I in ("%NEW_DIR:"=%") do (
         set "TARGET_DIR=%%~fI"
         call :CHECK_PROTECTED
         if defined TARGET_DIR (
-            echo  [OK] Target directory updated to: "%%~fI"
+            if "%IS_SYSTEM_OVERRIDDEN%"=="1" (
+                echo  [OK] Advanced Mode active: System target folder accepted.
+            ) else (
+                echo  [OK] Target directory updated to: "%%~fI"
+            )
             timeout /t 1 >nul 2>&1
         )
     ) else (
@@ -362,7 +389,7 @@ if "%IS_SENSITIVE%"=="1" (
     if /i not "%CONFIRM:"=%"=="Y" goto CANCEL_BLOCK
 )
 
-if "%ADVANCED_MODE%"=="1" if not "%IS_SENSITIVE%"=="1" (
+if "%IS_SYSTEM_OVERRIDDEN%"=="1" (
     cls
     echo ==============================================================================
     echo  [ADVANCED / POWER USER WARNING] SYSTEM DIRECTORY OVERRIDE ACTIVE!
@@ -499,6 +526,27 @@ goto MENU
 if not defined TARGET_DIR call :CHECK_DIR_SET
 call :CHECK_PROTECTED
 if not defined TARGET_DIR goto MENU
+
+if "%IS_SYSTEM_OVERRIDDEN%"=="1" (
+    cls
+    echo ==============================================================================
+    echo  [ADVANCED / POWER USER WARNING] SYSTEM DIRECTORY UNBLOCK OVERRIDE ACTIVE!
+    echo ==============================================================================
+    echo  Directory: "%TARGET_DIR%"
+    echo  [!] WARNING: Operating in Advanced / Power User Mode.
+    echo ==============================================================================
+    echo.
+    set "CONFIRM_ADV_UNB="
+    set /p "CONFIRM_ADV_UNB=Do you want to proceed with removing rules for this system directory? [Y/N]: "
+    if not defined CONFIRM_ADV_UNB goto CANCEL_UNBLOCK
+    if /i not "%CONFIRM_ADV_UNB:"=%"=="Y" goto CANCEL_UNBLOCK
+)
+goto UNBLOCK_EXES
+
+:CANCEL_UNBLOCK
+echo  [CANCEL] Unblock operation cancelled by user.
+timeout /t 2 >nul 2>&1
+goto MENU
 
 :UNBLOCK_EXES
 cls
