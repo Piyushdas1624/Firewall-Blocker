@@ -95,6 +95,9 @@ function Cleanup-TempElevationScript {
         } catch {}
     }
 }
+try {
+    $null = Register-EngineEvent -SourceIdentifier ([System.Management.Automation.PsEngineEvent]::Exiting) -Action { Cleanup-TempElevationScript } -SupportEvent
+} catch {}
 
 # ------------------------------------------------------------------------------
 # 2. System Validation & Safety Checks
@@ -320,7 +323,8 @@ function Assert-Elevated {
     param(
         [string]$CurrentTargetDir,
         [string]$CurrentAction,
-        [switch]$IsNonInteractive
+        [switch]$IsNonInteractive,
+        [switch]$Force = $false
     )
     if (Test-IsAdmin) { return $true }
 
@@ -366,6 +370,9 @@ function Assert-Elevated {
         }
     } else {
         # Running in-memory (e.g. irm | iex). Write self script content to temp file.
+        try {
+            Get-ChildItem -Path $env:TEMP -Filter "FirewallBlocker_Elevated*.ps1" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+        } catch {}
         $tempScript = Join-Path $env:TEMP "FirewallBlocker_Elevated.ps1"
         try {
             if (-not [string]::IsNullOrEmpty($Script:SelfCode)) {
@@ -509,15 +516,39 @@ function Invoke-Netsh {
     $psi.CreateNoWindow = $true
 
     try {
-        $proc = [System.Diagnostics.Process]::Start($psi)
-        $stdout = $proc.StandardOutput.ReadToEnd()
-        $stderr = $proc.StandardError.ReadToEnd()
-        $proc.WaitForExit()
+        $proc = New-Object System.Diagnostics.Process
+        $proc.StartInfo = $psi
+        $null = $proc.Start()
+
+        $hasAsync = ([System.IO.StreamReader].GetMethod('ReadToEndAsync', [Type]::EmptyTypes) -ne $null)
+        if ($hasAsync) {
+            $outTask = $proc.StandardOutput.ReadToEndAsync()
+            $errTask = $proc.StandardError.ReadToEndAsync()
+            if (-not $proc.WaitForExit(15000)) {
+                try { $proc.Kill() } catch {}
+            }
+            $stdout = if ($outTask.IsCompleted) { $outTask.Result } else { "" }
+            $stderr = if ($errTask.IsCompleted) { $errTask.Result } else { "" }
+        } else {
+            # Synchronous fallback for legacy PowerShell 2.0 / .NET 3.5
+            $stdout = $proc.StandardOutput.ReadToEnd()
+            $stderr = $proc.StandardError.ReadToEnd()
+            if (-not $proc.WaitForExit(15000)) {
+                try { $proc.Kill() } catch {}
+            }
+        }
+
+        $exitCode = -1
+        try {
+            if ($proc.HasExited) {
+                $exitCode = $proc.ExitCode
+            }
+        } catch {}
 
         $combined = ($stdout + "`n" + $stderr).Trim()
         return @{
-            ExitCode = $proc.ExitCode
-            Success  = ($proc.ExitCode -eq 0)
+            ExitCode = $exitCode
+            Success  = ($exitCode -eq 0)
             Output   = $combined
         }
     } catch {
@@ -619,38 +650,44 @@ function Test-ExecutableRuleStatus {
     $checkIn = Invoke-Netsh -Arguments "advfirewall firewall show rule name=`"$inRule`""
     $checkOut = Invoke-Netsh -Arguments "advfirewall firewall show rule name=`"$outRule`""
     
-    $inBlocked = ($checkIn.Success -and ($checkIn.Output -match '(?i)(Action|Aktion|Acci[o\u00F3]n|\u0414\u0435\u0439\u0441\u0442\u0432\u0438\u0435|\u64CD\u4F5C|\uB3D9\uC791)[\s:]+(Block|Bloqu|Blockier|\u0411\u043B\u043E\u043A\u0438\u0440|\u963B\u6B62|\uCC28\uB2E8)' -or ($checkIn.Output -notmatch '(?i)(Allow|Zulassen|Autoris|Permit|\u0420\u0430\u0437\u0440\u0435\u0448|\u5141\u8BB8|\uD5C8\uC6A9)' -and $checkIn.Output -match '(?i)(Rule Name|Regelname|Nom de r[e\u00E8\u00E9]gle|Nombre de regla|\u0418\u043C\u044F \u043F\u0440\u0430\u0432\u0438\u043B\u0430|\u89C4\u5219\u540D\u79F0|\u898F\u5247\u540D\u7A31|\uADDC\uCE59\s*\uC774\uB887)')))
-    if ($checkIn.Output -match '(?i)(Enabled|Aktiviert|Activ[e\u00E9]|Habilitado|\u0412\u043A\u043B\u044E\u0447\u0435\u043D\u043E|\u5DF2\u542F\u7528)[\s:]+(No|Nein|Non|No|\u041D\u0435\u0442|\u5426|\uC544\uB2C8\uC694)') { $inBlocked = $false }
+    # Multilingual token matchers (EN, DE, FR, ES, IT, PT, RU, ZH-Hans, ZH-Hant, JA, KO)
+    $blockActionRegex = '(?i)(?:Action|Aktion|Acci[o\u00F3]n|Azione|A[c\u00E7][a\u00E3]o|\u0414\u0435\u0439\u0441\u0442\u0432\u0438\u0435|\u64CD\u4F5C|\u52D5\u4F5C|\uC791\uC5C5|\uB3D9\uC791)[\s:\uFF1A]+(?:Block|Bloqu|Blockier|Blocca|\u0411\u043B\u043E\u043A\u0438\u0440|\u963B\u6B62|\u5C01\u9396|\u30D6\u30ED\u30C3\u30AF|\uCC28\uB2E8)'
+    $allowActionRegex = '(?i)(?:Action|Aktion|Acci[o\u00F3]n|Azione|A[c\u00E7][a\u00E3]o|\u0414\u0435\u0439\u0441\u0442\u0432\u0438\u0435|\u64CD\u4F5C|\u52D5\u4F5C|\uC791\uC5C5|\uB3D9\uC791)[\s:\uFF1A]+(?:Allow|Zulassen|Autoris|Permit|Consenti|\u0420\u0430\u0437\u0440\u0435\u0448|\u5141\u8BB8|\u5141\u8A31|\u8A31\u53EF|\uD5C8\uC6A9)'
+    $ruleExistsRegex  = '(?i)(?:Rule Name|Regelname|Nom de r[e\u00E8\u00E9]gle|Nombre de regla|Nome regola|\u0418\u043C\u044F \u043F\u0440\u0430\u0432\u0438\u043B\u0430|\u89C4\u5219\u540D\u79F0|\u898F\u5247\u540D|\uADDC\uCE59\s*\uC774\uB984|Name)[\s:\uFF1A]+'
+    $disabledRegex    = '(?i)(?:Enabled|Aktiviert|Activ[e\u00E9]|Habilitado|Abilitato|\u0412\u043A\u043B\u044E\u0447\u0435\u043D\u043E|\u5DF2\u542F\u7528|\u5DF2\u555F\u7528|\u6709\u52B9|\uC0AC\uC6A9|\uD65C\uC131\uD654)[\s:\uFF1A]+(?:No|Nein|Non|No|\u041D\u0435\u0442|\u5426|\u3044\u3044\u3048|\uC544\uB2C8\uC694)'
 
-    $outBlocked = ($checkOut.Success -and ($checkOut.Output -match '(?i)(Action|Aktion|Acci[o\u00F3]n|\u0414\u0435\u0439\u0441\u0442\u0432\u0438\u0435|\u64CD\u4F5C|\uB3D9\uC791)[\s:]+(Block|Bloqu|Blockier|\u0411\u043B\u043E\u043A\u0438\u0440|\u963B\u6B62|\uCC28\uB2E8)' -or ($checkOut.Output -notmatch '(?i)(Allow|Zulassen|Autoris|Permit|\u0420\u0430\u0437\u0440\u0435\u0448|\u5141\u8BB8|\uD5C8\uC6A9)' -and $checkOut.Output -match '(?i)(Rule Name|Regelname|Nom de r[e\u00E8\u00E9]gle|Nombre de regla|\u0418\u043C\u044F \u043F\u0440\u0430\u0432\u0438\u043B\u0430|\u89C4\u5219\u540D\u79F0|\u898F\u5247\u540D\u7A31|\uADDC\uCE59\s*\uC774\uB887)')))
-    if ($checkOut.Output -match '(?i)(Enabled|Aktiviert|Activ[e\u00E9]|Habilitado|\u0412\u043A\u043B\u044E\u0447\u0435\u043D\u043E|\u5DF2\u542F\u7528)[\s:]+(No|Nein|Non|No|\u041D\u0435\u0442|\u5426|\uC544\uB2C8\uC694)') { $outBlocked = $false }
+    $isRuleBlocked = {
+        param($res)
+        if (-not $res.Success) { return $false }
+        $txt = $res.Output
+        if ($txt -match $disabledRegex) { return $false }
+        if ($txt -match $blockActionRegex) { return $true }
+        if ($txt -match $allowActionRegex) { return $false }
+        if ($txt -match $ruleExistsRegex) { return $true }
+        return $false
+    }
+
+    $inBlocked = (& $isRuleBlocked $checkIn)
+    $outBlocked = (& $isRuleBlocked $checkOut)
 
     # Also check batch format rules (without hash)
     if (-not $inBlocked) {
         $batchIn = Invoke-Netsh -Arguments "advfirewall firewall show rule name=`"[FWB-IN] $cleanName`""
-        if ($batchIn.Success -and ($batchIn.Output -match '(?i)(Action|Aktion|Acci[o\u00F3]n|\u0414\u0435\u0439\u0441\u0442\u0432\u0438\u0435|\u64CD\u4F5C|\uB3D9\uC791)[\s:]+(Block|Bloqu|Blockier|\u0411\u043B\u043E\u043A\u0438\u0440|\u963B\u6B62|\uCC28\uB2E8)' -or ($batchIn.Output -notmatch '(?i)(Allow|Zulassen|Autoris|Permit|\u0420\u0430\u0437\u0440\u0435\u0448|\u5141\u8BB8|\uD5C8\uC6A9)' -and $batchIn.Output -match '(?i)(Rule Name|Regelname|Nom de r[e\u00E8\u00E9]gle|Nombre de regla|\u0418\u043C\u044F \u043F\u0440\u0430\u0432\u0438\u043B\u0430|\u89C4\u5219\u540D\u79F0|\u898F\u5247\u540D\u7A31|\uADDC\uCE59\s*\uC774\uB887)'))) {
-            if ($batchIn.Output -notmatch '(?i)(Enabled|Aktiviert|Activ[e\u00E9]|Habilitado|\u0412\u043A\u043B\u044E\u0447\u0435\u043D\u043E|\u5DF2\u542F\u7528)[\s:]+(No|Nein|Non|No|\u041D\u0435\u0442|\u5426|\uC544\uB2C8\uC694)') { $inBlocked = $true }
-        }
+        if (& $isRuleBlocked $batchIn) { $inBlocked = $true }
     }
     if (-not $outBlocked) {
         $batchOut = Invoke-Netsh -Arguments "advfirewall firewall show rule name=`"[FWB-OUT] $cleanName`""
-        if ($batchOut.Success -and ($batchOut.Output -match '(?i)(Action|Aktion|Acci[o\u00F3]n|\u0414\u0435\u0439\u0441\u0442\u0432\u0438\u0435|\u64CD\u4F5C|\uB3D9\uC791)[\s:]+(Block|Bloqu|Blockier|\u0411\u043B\u043E\u043A\u0438\u0440|\u963B\u6B62|\uCC28\uB2E8)' -or ($batchOut.Output -notmatch '(?i)(Allow|Zulassen|Autoris|Permit|\u0420\u0430\u0437\u0440\u0435\u0448|\u5141\u8BB8|\uD5C8\uC6A9)' -and $batchOut.Output -match '(?i)(Rule Name|Regelname|Nom de r[e\u00E8\u00E9]gle|Nombre de regla|\u0418\u043C\u044F \u043F\u0440\u0430\u0432\u0438\u043B\u0430|\u89C4\u5219\u540D\u79F0|\u898F\u5247\u540D\u7A31|\uADDC\uCE59\s*\uC774\uB887)'))) {
-            if ($batchOut.Output -notmatch '(?i)(Enabled|Aktiviert|Activ[e\u00E9]|Habilitado|\u0412\u043A\u043B\u044E\u0447\u0435\u043D\u043E|\u5DF2\u542F\u7528)[\s:]+(No|Nein|Non|No|\u041D\u0435\u0442|\u5426|\uC544\uB2C8\uC694)') { $outBlocked = $true }
-        }
+        if (& $isRuleBlocked $batchOut) { $outBlocked = $true }
     }
 
     # Also check legacy rule formats
     if (-not $inBlocked) {
         $legacyIn = Invoke-Netsh -Arguments "advfirewall firewall show rule name=`"[FolderBlock-IN] $cleanName`""
-        if ($legacyIn.Success -and ($legacyIn.Output -match '(?i)(Action|Aktion|Acci[o\u00F3]n|\u0414\u0435\u0439\u0441\u0442\u0432\u0438\u0435|\u64CD\u4F5C|\uB3D9\uC791)[\s:]+(Block|Bloqu|Blockier|\u0411\u043B\u043E\u043A\u0438\u0440|\u963B\u6B62|\uCC28\uB2E8)' -or ($legacyIn.Output -notmatch '(?i)(Allow|Zulassen|Autoris|Permit|\u0420\u0430\u0437\u0440\u0435\u0448|\u5141\u8BB8|\uD5C8\uC6A9)' -and $legacyIn.Output -match '(?i)(Rule Name|Regelname|Nom de r[e\u00E8\u00E9]gle|Nombre de regla|\u0418\u043C\u044F \u043F\u0440\u0430\u0432\u0438\u043B\u0430|\u89C4\u5219\u540D\u79F0|\u898F\u5247\u540D\u7A31|\uADDC\uCE59\s*\uC774\uB887)'))) {
-            if ($legacyIn.Output -notmatch '(?i)(Enabled|Aktiviert|Activ[e\u00E9]|Habilitado|\u0412\u043A\u043B\u044E\u0447\u0435\u043D\u043E|\u5DF2\u542F\u7528)[\s:]+(No|Nein|Non|No|\u041D\u0435\u0442|\u5426|\uC544\uB2C8\uC694)') { $inBlocked = $true }
-        }
+        if (& $isRuleBlocked $legacyIn) { $inBlocked = $true }
     }
     if (-not $outBlocked) {
         $legacyOut = Invoke-Netsh -Arguments "advfirewall firewall show rule name=`"[FolderBlock-OUT] $cleanName`""
-        if ($legacyOut.Success -and ($legacyOut.Output -match '(?i)(Action|Aktion|Acci[o\u00F3]n|\u0414\u0435\u0439\u0441\u0442\u0432\u0438\u0435|\u64CD\u4F5C|\uB3D9\uC791)[\s:]+(Block|Bloqu|Blockier|\u0411\u043B\u043E\u043A\u0438\u0440|\u963B\u6B62|\uCC28\uB2E8)' -or ($legacyOut.Output -notmatch '(?i)(Allow|Zulassen|Autoris|Permit|\u0420\u0430\u0437\u0440\u0435\u0448|\u5141\u8BB8|\uD5C8\uC6A9)' -and $legacyOut.Output -match '(?i)(Rule Name|Regelname|Nom de r[e\u00E8\u00E9]gle|Nombre de regla|\u0418\u043C\u044F \u043F\u0440\u0430\u0432\u0438\u043B\u0430|\u89C4\u5219\u540D\u79F0|\u898F\u5247\u540D\u7A31|\uADDC\uCE59\s*\uC774\uB887)'))) {
-            if ($legacyOut.Output -notmatch '(?i)(Enabled|Aktiviert|Activ[e\u00E9]|Habilitado|\u0412\u043A\u043B\u044E\u0447\u0435\u043D\u043E|\u5DF2\u542F\u7528)[\s:]+(No|Nein|Non|No|\u041D\u0435\u0442|\u5426|\uC544\uB2C8\uC694)') { $outBlocked = $true }
-        }
+        if (& $isRuleBlocked $legacyOut) { $outBlocked = $true }
     }
 
     return @{
@@ -902,17 +939,22 @@ function Invoke-UnblockOperation {
         Write-Host ("  [{0,3}/{1,-3}] Unblocking: {2}" -f $processedCount, $exes.Count, $exeName) -ForegroundColor White
 
         $rulesToDelete = @(
-            $inRuleName,
-            $outRuleName,
-            "[FWB-IN] $($exeName.Replace('"', ''))",
-            "[FWB-OUT] $($exeName.Replace('"', ''))",
-            "[FolderBlock-IN] $exeName",
-            "[FolderBlock-OUT] $exeName"
+            @{ Name = $inRuleName; Program = $null },
+            @{ Name = $outRuleName; Program = $null },
+            @{ Name = "[FWB-IN] $($exeName.Replace('"', ''))"; Program = $exePath },
+            @{ Name = "[FWB-OUT] $($exeName.Replace('"', ''))"; Program = $exePath },
+            @{ Name = "[FolderBlock-IN] $exeName"; Program = $exePath },
+            @{ Name = "[FolderBlock-OUT] $exeName"; Program = $exePath }
         )
 
-        foreach ($rName in $rulesToDelete) {
-            $delRes = Invoke-Netsh -Arguments "advfirewall firewall delete rule name=`"$rName`""
-            if ($delRes.Success -and $delRes.Output -notmatch '(?i)(No rules match|Keine Regeln|Aucune r[e\u00E8\u00E9]gle|Ninguna regla|\u0421\u043E\u0432\u043F\u0430\u0434\u0430\u044E\u0449\u0438\u0445|\u6CA1\u6709\u4E0E\u6307\u5B9A|\u6CA1\u6709\u89C4\u5219|0 rule\(s\)|0 Regel\(n\))') {
+        foreach ($r in $rulesToDelete) {
+            $rName = $r.Name
+            $delArgs = "advfirewall firewall delete rule name=`"$rName`""
+            if ($r.Program) {
+                $delArgs += " program=`"$($r.Program)`""
+            }
+            $delRes = Invoke-Netsh -Arguments $delArgs
+            if ($delRes.Success -and $delRes.Output -notmatch '(?i)(No rules match|Keine Regeln|Aucune r[e\u00E8\u00E9]gle|Ninguna regla|\u0421\u043E\u0432\u043F\u0430\u0434\u0430\u044E\u0449\u0438\u0445|\u6CA1\u6709\u4E0E\u6307\u5B9A|\u6CA1\u6709\u89C4\u5219|\u4E00\u81F4\u3059\u308B\u898F\u5247|\uC77C\uCE58\uD558\uB294\s*\uADDC\uCE59|0 rule\(s\)|0 Regel\(n\))') {
                 if ($delRes.Output -match '(?i)(?:Deleted\s+|gel[o\u00F6]scht|supprim[e\u00E9]\(s\)|eliminaron\s+|\u043F\u0440\u0430\u0432\u0438\u043B|\u89C4\u5219|\u898F\u5247|\uADDC\uCE59\s*)(\d+)' -or $delRes.Output -match '(\d+)\s*(?:rule|regel|r[e\u00E8\u00E9]gle|regla)') {
                     $deletedRules += [int]$matches[1]
                 } else {
@@ -941,7 +983,7 @@ function Invoke-UnblockOperation {
 }
 
 function Invoke-UnblockAllSystem {
-    if (-not (Assert-Elevated -CurrentAction "UnblockAll" -IsNonInteractive:$NonInteractive)) {
+    if (-not (Assert-Elevated -CurrentAction "UnblockAll" -IsNonInteractive:$NonInteractive -Force:$Force)) {
         if ($NonInteractive) { exit 1 }
         return $false
     }
@@ -963,12 +1005,12 @@ function Invoke-UnblockAllSystem {
     $matchedRuleNames = New-Object System.Collections.ArrayList
     $lines = $allRules.Output -split "`r?`n"
     foreach ($line in $lines) {
-        if ($line -match '(?i)(?:Rule Name|Regelname|Nom de r[e\u00E8\u00E9]gle|Nombre de regla|\u0418\u043C\u044F \u043F\u0440\u0430\u0432\u0438\u043B\u0430|\u89C4\u5219\u540D\u79F0|\u898F\u5247\u540D\u7A31|\uADDC\uCE59\s*\uC774\uB887|Name)[\s:\uFF1A]+(\[(?:FWB|FolderBlock)-(?:IN|OUT)\].+)') {
+        if ($line -match '(?i)(?:Rule Name|Regelname|Nom de r[e\u00E8\u00E9]gle|Nombre de regla|Nome regola|\u0418\u043C\u044F \u043F\u0440\u0430\u0432\u0438\u043B\u0430|\u89C4\u5219\u540D\u79F0|\u898F\u5247\u540D|\uADDC\uCE59\s*\uC774\uB984|Name)[\s:\uFF1A]+(\[(?:FWB|FolderBlock)-(?:IN|OUT)\].+)') {
             $rName = $matches[1].Trim()
             if (-not $matchedRuleNames.Contains($rName)) {
                 $null = $matchedRuleNames.Add($rName)
             }
-        } elseif ($line -match '[:\uFF1A]\s*(\[(?:FWB|FolderBlock)-(?:IN|OUT)\].+)' -and $line -notmatch '(?i)(Description|Beschreibung|Descripci[o\u00F3]n|\u041E\u043F\u0438\u0441\u0430\u043D\u0438\u0435|\u63CF\u8FF0|\uC124\uBA85)') {
+        } elseif ($line -match '[:\uFF1A]\s*(\[(?:FWB|FolderBlock)-(?:IN|OUT)\].+)' -and $line -notmatch '(?i)(Description|Beschreibung|Descripci[o\u00F3]n|Descrizione|\u041E\u043F\u0438\u0441\u0430\u043D\u0438\u0435|\u63CF\u8FF0|\u8AAC\u660E|\uC124\uBA85)') {
             $rName = $matches[1].Trim()
             if (-not $matchedRuleNames.Contains($rName)) {
                 $null = $matchedRuleNames.Add($rName)

@@ -93,14 +93,11 @@ if not defined TARGET_DIR (
     set "INPUT_DIR="
     set /p "INPUT_DIR=Folder Path: "
     if defined INPUT_DIR (
-        setlocal EnableDelayedExpansion
-        set "CLEAN_DIR=!INPUT_DIR:"=!"
-        for /f "delims=" %%D in ("!CLEAN_DIR!") do (
-            endlocal
-            if exist "%%~fD" (
-                set "TARGET_DIR=%%~fD"
+        for %%I in ("%INPUT_DIR:"=%") do (
+            if exist "%%~fI" (
+                set "TARGET_DIR=%%~fI"
             ) else (
-                echo  [!] Directory not found: "%%~fD"
+                echo  [!] Directory not found: "%%~fI"
                 timeout /t 2 >nul 2>&1
             )
         )
@@ -110,26 +107,43 @@ exit /b 0
 
 :CHECK_PROTECTED
 if not defined TARGET_DIR exit /b 1
-if /i "%TARGET_DIR%"=="%SystemRoot%" goto PROTECTED_ERROR
-if /i "%TARGET_DIR%"=="%SystemRoot%\" goto PROTECTED_ERROR
-if /i "%TARGET_DIR%"=="%SystemRoot%\System32" goto PROTECTED_ERROR
-if /i "%TARGET_DIR%"=="%SystemRoot%\System32\" goto PROTECTED_ERROR
-if /i "%TARGET_DIR%"=="%SystemDrive%\" goto PROTECTED_ERROR
-if /i "%TARGET_DIR%"=="%SystemDrive%" goto PROTECTED_ERROR
-if /i "%TARGET_DIR%"=="%ProgramFiles%" goto PROTECTED_ERROR
-if /i "%TARGET_DIR%"=="%ProgramFiles%\" goto PROTECTED_ERROR
+
+:: Normalize trailing slash
+set "CHK_DIR=%TARGET_DIR%"
+if "%CHK_DIR:~-1%"=="\" set "CHK_DIR=%CHK_DIR:~0,-1%"
+
+:: Check root drive (e.g. C: or C:\)
+if "%CHK_DIR:~1,2%"==":\" if "%CHK_DIR:~3%"=="" goto PROTECTED_ERROR
+if "%CHK_DIR:~1,1%"==":" if "%CHK_DIR:~2%"=="" goto PROTECTED_ERROR
+
+:: Check Windows directory or any subdirectory (System32, SysWOW64, WinSxS, etc.)
+set "TD_SLASH=%CHK_DIR%\"
+call set "TD_SUB=%%TD_SLASH:%SystemRoot%\=%%"
+if not "%TD_SUB%"=="%TD_SLASH%" goto PROTECTED_ERROR
+if /i "%CHK_DIR%"=="%SystemRoot%" goto PROTECTED_ERROR
+
+:: Check Program Files & Program Files (x86) root directory directly
+if /i "%CHK_DIR%"=="%ProgramFiles%" goto PROTECTED_ERROR
 if defined ProgramFiles(x86) (
-    if /i "%TARGET_DIR%"=="%ProgramFiles(x86)%" goto PROTECTED_ERROR
-    if /i "%TARGET_DIR%"=="%ProgramFiles(x86)%\" goto PROTECTED_ERROR
+    if /i "%CHK_DIR%"=="%ProgramFiles(x86)%" goto PROTECTED_ERROR
 )
+
+:: Check ProgramData root directory directly and Defender folders
 if defined ProgramData (
-    if /i "%TARGET_DIR%"=="%ProgramData%" goto PROTECTED_ERROR
-    if /i "%TARGET_DIR%"=="%ProgramData%\" goto PROTECTED_ERROR
-    if /i "%TARGET_DIR%"=="%ProgramData%\Microsoft\Windows Defender" goto PROTECTED_ERROR
-    if /i "%TARGET_DIR%"=="%ProgramData%\Microsoft\Windows Defender\" goto PROTECTED_ERROR
+    if /i "%CHK_DIR%"=="%ProgramData%" goto PROTECTED_ERROR
+    call set "TD_DEF_DATA=%%TD_SLASH:%ProgramData%\Microsoft\Windows Defender\=%%"
+    if not "%TD_DEF_DATA%"=="%TD_SLASH%" goto PROTECTED_ERROR
+    call set "TD_DEF_DATA2=%%TD_SLASH:%ProgramData%\Microsoft\Windows Defender Advanced Threat Protection\=%%"
+    if not "%TD_DEF_DATA2%"=="%TD_SLASH%" goto PROTECTED_ERROR
 )
-if /i "%TARGET_DIR%"=="%ProgramFiles%\Windows Defender" goto PROTECTED_ERROR
-if /i "%TARGET_DIR%"=="%ProgramFiles%\Windows Defender\" goto PROTECTED_ERROR
+
+:: Check Defender in Program Files / Program Files (x86)
+call set "TD_DEF_PF=%%TD_SLASH:%ProgramFiles%\Windows Defender\=%%"
+if not "%TD_DEF_PF%"=="%TD_SLASH%" goto PROTECTED_ERROR
+if defined ProgramFiles(x86) (
+    call set "TD_DEF_PF86=%%TD_SLASH:%ProgramFiles(x86)%\Windows Defender\=%%"
+    if not "%TD_DEF_PF86%"=="%TD_SLASH%" goto PROTECTED_ERROR
+)
 exit /b 0
 
 :PROTECTED_ERROR
@@ -154,19 +168,16 @@ echo.
 set "NEW_DIR="
 set /p "NEW_DIR=Enter folder path (or press Enter to cancel): "
 if not defined NEW_DIR goto MENU
-setlocal EnableDelayedExpansion
-set "CLEAN_DIR=!NEW_DIR:"=!"
-for /f "delims=" %%D in ("!CLEAN_DIR!") do (
-    endlocal
-    if exist "%%~fD" (
-        set "TARGET_DIR=%%~fD"
+for %%I in ("%NEW_DIR:"=%") do (
+    if exist "%%~fI" (
+        set "TARGET_DIR=%%~fI"
         call :CHECK_PROTECTED
         if defined TARGET_DIR (
-            echo  [OK] Target directory updated to: "%%~fD"
+            echo  [OK] Target directory updated to: "%%~fI"
             timeout /t 1 >nul 2>&1
         )
     ) else (
-        echo  [!] Directory not found: "%%~fD"
+        echo  [!] Directory not found: "%%~fI"
         timeout /t 2 >nul 2>&1
     )
 )
@@ -242,21 +253,27 @@ for /r "%TARGET_DIR%" %%F in (*.exe) do (
         set "EXE_NAME=%%~nxF"
         set "EXE_PATH=%%~fF"
         
-        :: Compute 8-char SHA256 path hash via certutil if available
+        :: Compute 8-char SHA256 path hash via certutil (case-insensitive by lowercasing path)
         set "RULE_HASH="
+        setlocal EnableDelayedExpansion
+        set "LOWER_PATH=!EXE_PATH!"
+        for %%A in (a b c d e f g h i j k l m n o p q r s t u v w x y z) do (
+            set "LOWER_PATH=!LOWER_PATH:%%A=%%A!"
+        )
         set "TMP_H=%TEMP%\_fwb_%RANDOM%.tmp"
-        <nul set /p="%%~fF">"%TMP_H%" 2>nul
-        for /f "skip=1 delims=" %%H in ('certutil -hashfile "%TMP_H%" SHA256 2^>nul') do (
+        <nul set /p="!LOWER_PATH!">"!TMP_H!" 2>nul
+        for /f "skip=1 delims=" %%H in ('certutil -hashfile "!TMP_H!" SHA256 2^>nul') do (
             if not defined RULE_HASH (
                 set "H=%%H"
                 set "H=!H: =!"
                 set "RULE_HASH=!H:~0,8!"
             )
         )
-        if exist "%TMP_H%" del "%TMP_H%" >nul 2>&1
-        
-        setlocal EnableDelayedExpansion
+        if exist "!TMP_H!" del "!TMP_H!" >nul 2>&1
         if defined RULE_HASH (
+            for %%A in (A B C D E F G H I J K L M N O P Q R S T U V W X Y Z) do (
+                set "RULE_HASH=!RULE_HASH:%%A=%%A!"
+            )
             set "IN_RULE=[FWB-IN] !EXE_NAME! (!RULE_HASH!)"
             set "OUT_RULE=[FWB-OUT] !EXE_NAME! (!RULE_HASH!)"
         ) else (
@@ -350,20 +367,29 @@ for /r "%TARGET_DIR%" %%F in (*.exe) do (
         set "EXE_NAME=%%~nxF"
         set "EXE_PATH=%%~fF"
         
-        :: Compute 8-char SHA256 path hash via certutil if available
+        :: Compute 8-char SHA256 path hash via certutil (case-insensitive by lowercasing path)
         set "RULE_HASH="
+        setlocal EnableDelayedExpansion
+        set "LOWER_PATH=!EXE_PATH!"
+        for %%A in (a b c d e f g h i j k l m n o p q r s t u v w x y z) do (
+            set "LOWER_PATH=!LOWER_PATH:%%A=%%A!"
+        )
         set "TMP_H=%TEMP%\_fwb_%RANDOM%.tmp"
-        <nul set /p="%%~fF">"%TMP_H%" 2>nul
-        for /f "skip=1 delims=" %%H in ('certutil -hashfile "%TMP_H%" SHA256 2^>nul') do (
+        <nul set /p="!LOWER_PATH!">"!TMP_H!" 2>nul
+        for /f "skip=1 delims=" %%H in ('certutil -hashfile "!TMP_H!" SHA256 2^>nul') do (
             if not defined RULE_HASH (
                 set "H=%%H"
                 set "H=!H: =!"
                 set "RULE_HASH=!H:~0,8!"
             )
         )
-        if exist "%TMP_H%" del "%TMP_H%" >nul 2>&1
+        if exist "!TMP_H!" del "!TMP_H!" >nul 2>&1
+        if defined RULE_HASH (
+            for %%A in (A B C D E F G H I J K L M N O P Q R S T U V W X Y Z) do (
+                set "RULE_HASH=!RULE_HASH:%%A=%%A!"
+            )
+        )
 
-        setlocal EnableDelayedExpansion
         echo [-] Cleaning rules for: !EXE_NAME!
         if defined RULE_HASH (
             netsh advfirewall firewall delete rule name="[FWB-IN] !EXE_NAME! (!RULE_HASH!)" >nul 2>&1

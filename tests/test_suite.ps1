@@ -255,25 +255,115 @@ try {
     }
 
     # -------------------------------------------------------------------------
-    # Test 12: Batch Fallback Engine Integrity Checks
+    # Test 12: Batch Engine Integrity, Variable Scoping & Hash Parity
     # -------------------------------------------------------------------------
-    Write-Host "`n[Test 12] Auditing Batch Engine Integrity & Non-Destructive Invariants..." -ForegroundColor Yellow
+    Write-Host "`n[Test 12] Auditing Batch Engine Integrity & Hash Parity..." -ForegroundColor Yellow
     $batContent = [System.IO.File]::ReadAllText($blockerBat)
 
     # Invariant 1: No setlocal/endlocal around CHECK_DIR_SET that destroys TARGET_DIR
     $hasScopeTrap = ($batContent -match 'setlocal\s+EnableDelayedExpansion\s+call\s+:CHECK_DIR_SET\s+endlocal')
     # Invariant 2: No destructive netsh delete rule name=all program=
     $hasOverDestructive = ($batContent -match 'netsh\s+advfirewall\s+firewall\s+delete\s+rule\s+name=all\s+program=')
+    # Invariant 3: No corrupting delayed expansion substitution on input paths
+    $hasDelayedSubTrap = ($batContent -match 'setlocal\s+EnableDelayedExpansion\s+set\s+"CLEAN_DIR=!(?:INPUT|NEW)_DIR:"=!')
 
-    if (-not $hasScopeTrap -and -not $hasOverDestructive) {
-        Write-Host "  -> PASS: FirewallBlocker.bat verified free of variable scope traps and over-destructive deletions." -ForegroundColor Green
+    if (-not $hasScopeTrap -and -not $hasOverDestructive -and -not $hasDelayedSubTrap) {
+        Write-Host "  -> PASS: FirewallBlocker.bat verified free of variable scope traps, destructive deletions, and delayed substitution bugs." -ForegroundColor Green
     } else {
-        Write-Host "  -> FAIL: FirewallBlocker.bat failed code invariants (scope trap: $hasScopeTrap, over-destructive: $hasOverDestructive)." -ForegroundColor Red
+        Write-Host "  -> FAIL: FirewallBlocker.bat failed code invariants (scope trap: $hasScopeTrap, over-destructive: $hasOverDestructive, delayed sub: $hasDelayedSubTrap)." -ForegroundColor Red
+        exit 1
+    }
+
+    # Verify live hash parity between batch fallback engine and PowerShell
+    $testComplexPath = "C:\Games & Tools (2024)\CrashReporter!.exe"
+    $psTargetHash = Get-PortableHash -InputString $testComplexPath
+    
+    # Run batch hash calculation
+    $batchTestCmd = @"
+@echo off
+setlocal DisableDelayedExpansion
+set "P=$testComplexPath"
+setlocal EnableDelayedExpansion
+set "LOWER=!P!"
+for %%A in (a b c d e f g h i j k l m n o p q r s t u v w x y z) do set "LOWER=!LOWER:%%A=%%A!"
+set "TMP_H=%TEMP%\_test_hash_%RANDOM%.tmp"
+<nul set /p="!LOWER!">"!TMP_H!" 2>nul
+set "RULE_HASH="
+for /f "skip=1 delims=" %%H in ('certutil -hashfile "!TMP_H!" SHA256 2^>nul') do (
+    if not defined RULE_HASH (
+        set "H=%%H"
+        set "H=!H: =!"
+        set "RULE_HASH=!H:~0,8!"
+    )
+)
+if exist "!TMP_H!" del "!TMP_H!" >nul 2>&1
+for %%A in (A B C D E F G H I J K L M N O P Q R S T U V W X Y Z) do set "RULE_HASH=!RULE_HASH:%%A=%%A!"
+echo !RULE_HASH!
+"@
+    $tmpBat = Join-Path $env:TEMP "test_batch_hash.bat"
+    [System.IO.File]::WriteAllText($tmpBat, $batchTestCmd, [System.Text.Encoding]::ASCII)
+    $rawBatOut = & cmd.exe /c $tmpBat
+    $batchHashOutput = if ($rawBatOut) { ($rawBatOut | Out-String).Trim() } else { "" }
+    Remove-Item $tmpBat -Force -ErrorAction SilentlyContinue
+
+    if ($batchHashOutput -eq $psTargetHash -and $batchHashOutput -eq "8C422CDA") {
+        Write-Host "  -> PASS: Batch engine SHA256 hash matches PowerShell ($batchHashOutput == $psTargetHash)." -ForegroundColor Green
+    } else {
+        Write-Host "  -> FAIL: Batch hash parity check failed. Batch: '$batchHashOutput', PS: '$psTargetHash'." -ForegroundColor Red
+        exit 1
+    }
+
+    # -------------------------------------------------------------------------
+    # Test 13: Multilingual Netsh Output Rule Status Parsing
+    # -------------------------------------------------------------------------
+    Write-Host "`n[Test 13] Verifying Multilingual Netsh Rule Parsing..." -ForegroundColor Yellow
+    
+    $blockActionRegex = '(?i)(?:Action|Aktion|Acci[o\u00F3]n|Azione|A[c\u00E7][a\u00E3]o|\u0414\u0435\u0439\u0441\u0442\u0432\u0438\u0435|\u64CD\u4F5C|\u52D5\u4F5C|\uC791\uC5C5|\uB3D9\uC791)[\s:\uFF1A]+(?:Block|Bloqu|Blockier|Blocca|\u0411\u043B\u043E\u043A\u0438\u0440|\u963B\u6B62|\u5C01\u9396|\u30D6\u30ED\u30C3\u30AF|\uCC28\uB2E8)'
+    $allowActionRegex = '(?i)(?:Action|Aktion|Acci[o\u00F3]n|Azione|A[c\u00E7][a\u00E3]o|\u0414\u0435\u0439\u0441\u0442\u0432\u0438\u0435|\u64CD\u4F5C|\u52D5\u4F5C|\uC791\uC5C5|\uB3D9\uC791)[\s:\uFF1A]+(?:Allow|Zulassen|Autoris|Permit|Consenti|\u0420\u0430\u0437\u0440\u0435\u0448|\u5141\u8BB8|\u5141\u8A31|\u8A31\u53EF|\uD5C8\uC6A9)'
+    $ruleExistsRegex  = '(?i)(?:Rule Name|Regelname|Nom de r[e\u00E8\u00E9]gle|Nombre de regla|Nome regola|\u0418\u043C\u044F \u043F\u0440\u0430\u0432\u0438\u043B\u0430|\u89C4\u5219\u540D\u79F0|\u898F\u5247\u540D|\uADDC\uCE59\s*\uC774\uB984|Name)[\s:\uFF1A]+'
+    $disabledRegex    = '(?i)(?:Enabled|Aktiviert|Activ[e\u00E9]|Habilitado|Abilitato|\u0412\u043A\u043B\u044E\u0447\u0435\u043D\u043E|\u5DF2\u542F\u7528|\u5DF2\u555F\u7528|\u6709\u52B9|\uC0AC\uC6A9|\uD65C\uC131\uD654)[\s:\uFF1A]+(?:No|Nein|Non|No|\u041D\u0435\u0442|\u5426|\u3044\u3044\u3048|\uC544\uB2C8\uC694)'
+
+    $evalRule = {
+        param([string]$outText, [bool]$success = $true)
+        if (-not $success) { return $false }
+        if ($outText -match $disabledRegex) { return $false }
+        if ($outText -match $blockActionRegex) { return $true }
+        if ($outText -match $allowActionRegex) { return $false }
+        if ($outText -match $ruleExistsRegex) { return $true }
+        return $false
+    }
+
+    $samples = @{
+        "DE_Block"       = "Regelname: [FWB-IN] game.exe`nAktiviert: Ja`nAktion: Blockieren"
+        "FR_Block"       = ("Nom de r" + ([char]0x00E8) + "gle: [FWB-IN] game.exe`nActiv" + ([char]0x00E9) + ": Oui`nAction: Bloquer")
+        "ES_Block"       = ("Nombre de regla: [FWB-IN] game.exe`nHabilitado: S" + ([char]0x00ED) + "`nAcci" + ([char]0x00F3) + "n: Bloquear")
+        "RU_Block"       = (([char]0x0418) + ([char]0x043C) + ([char]0x044F) + ": [FWB-IN] game.exe`n" + ([char]0x0414) + ([char]0x0435) + ([char]0x0439) + ([char]0x0441) + ([char]0x0442) + ([char]0x0432) + ([char]0x0438) + ([char]0x0435) + ": " + ([char]0x0411) + ([char]0x043B) + ([char]0x043E) + ([char]0x043A) + ([char]0x0438) + ([char]0x0440))
+        "ZH_Hans_Block"  = (([char]0x89C4) + ([char]0x5219) + ": [FWB-IN] game.exe`n" + ([char]0x64CD) + ([char]0x4F5C) + ": " + ([char]0x963B) + ([char]0x6B62))
+        "ZH_Hant_Block"  = (([char]0x898F) + ([char]0x5247) + ": [FWB-IN] game.exe`n" + ([char]0x52D5) + ([char]0x4F5C) + ": " + ([char]0x5C01) + ([char]0x9396))
+        "JA_Block"       = (([char]0x898F) + ([char]0x5247) + ([char]0x540D) + ": [FWB-IN] game.exe`n" + ([char]0x64CD) + ([char]0x4F5C) + ": " + ([char]0x30D6) + ([char]0x30ED) + ([char]0x30C3) + ([char]0x30AF))
+        "KO_Block"       = (([char]0xADDC) + ([char]0xCE59) + " " + ([char]0xC774) + ([char]0xB984) + ": [FWB-IN] game.exe`n" + ([char]0xC791) + ([char]0xC5C5) + ": " + ([char]0xCC28) + ([char]0xB2E8))
+        "EN_Disabled"    = "Rule Name: [FWB-IN] game.exe`nEnabled: No`nAction: Block"
+        "EN_Allow"       = "Rule Name: [FWB-IN] game.exe`nEnabled: Yes`nAction: Allow"
+    }
+
+    $allPassed = $true
+    foreach ($k in $samples.Keys) {
+        $res = & $evalRule $samples[$k] $true
+        $expected = (-not $k.Contains("Disabled") -and -not $k.Contains("Allow"))
+        if ($res -ne $expected) {
+            Write-Host "  -> FAIL: Sample $k evaluated to $res, expected $expected" -ForegroundColor Red
+            $allPassed = $false
+        }
+    }
+
+    if ($allPassed) {
+        Write-Host "  -> PASS: Multilingual netsh rule parser verified across German, French, Spanish, Russian, Chinese, Japanese, and Korean." -ForegroundColor Green
+    } else {
         exit 1
     }
 
     Write-Host "`n====================================================" -ForegroundColor Cyan
-    Write-Host "All 12 Comprehensive Tests PASSED Successfully!" -ForegroundColor Green
+    Write-Host "All 13 Comprehensive Tests PASSED Successfully!" -ForegroundColor Green
     Write-Host "====================================================" -ForegroundColor Cyan
 
 } finally {
