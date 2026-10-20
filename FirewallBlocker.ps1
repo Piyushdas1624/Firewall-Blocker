@@ -92,6 +92,10 @@ $Script:SelfCode = ""
 if ($Script:RunningFromFile) {
     try {
         $Script:SelfCode = [System.IO.File]::ReadAllText($Script:ScriptFilePath, [System.Text.Encoding]::UTF8)
+        # Immediate self-cleanup if running as elevated temp script (parsed into memory, safe to delete)
+        if ($Script:ScriptFilePath -like "*FirewallBlocker_Elevated*.ps1") {
+            try { [System.IO.File]::Delete($Script:ScriptFilePath) } catch {}
+        }
     } catch {}
 }
 if (-not (Test-IsRealScriptContent -Code $Script:SelfCode)) {
@@ -1041,6 +1045,25 @@ function Invoke-BlockOperation {
                     Read-Host "`n  Press ENTER to return to menu..."
                     return $true
                 }
+            }
+        }
+    } else {
+        # Standard interactive preview & confirmation
+        if (-not $NonInteractive -and -not $Force) {
+            Write-Host "  Executable Preview ($($exes.Count) found):" -ForegroundColor Cyan
+            $previewCount = [System.Math]::Min($exes.Count, 8)
+            for ($i = 0; $i -lt $previewCount; $i++) {
+                Write-Host ("    - {0}" -f $exes[$i].Name) -ForegroundColor DarkGray
+            }
+            if ($exes.Count -gt 8) {
+                Write-Host ("    ... and {0} more executable(s)" -f ($exes.Count - 8)) -ForegroundColor DarkGray
+            }
+            Write-Host ""
+            $proceedPrompt = Read-Host "  Apply $Mode block rules to these $($exes.Count) executable(s)? [Y/N] (Default: Y)"
+            if (-not [string]::IsNullOrEmpty($proceedPrompt) -and $proceedPrompt -notmatch '^[Yy]') {
+                Write-Host "  [CANCEL] Block operation cancelled by user." -ForegroundColor Yellow
+                Read-Host "`n  Press ENTER to return to menu..."
+                return $true
             }
         }
     }

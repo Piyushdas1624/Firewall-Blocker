@@ -81,6 +81,13 @@ Paste directly into an ordinary Command Prompt window:
 powershell -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol=3072; iex ((New-Object Net.WebClient).DownloadString('https://raw.githubusercontent.com/Piyushdas1624/Firewall-Blocker/main/run.ps1'))"
 ```
 
+### 🔒 Enterprise & Security-Conscious Deployment (Pinned Commit)
+For corporate environments or security-conscious users where unpinned remote scripts are restricted:
+```powershell
+# Pin execution to an audited immutable commit hash:
+irm https://raw.githubusercontent.com/Piyushdas1624/Firewall-Blocker/5beff57/run.ps1 | iex
+```
+
 ---
 
 ## 💾 Local & Offline Execution

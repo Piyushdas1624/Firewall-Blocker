@@ -274,11 +274,13 @@ try {
         exit 1
     }
 
-    # Verify live hash parity between batch fallback engine and PowerShell
+    # Verify live hash parity between batch fallback engine and PowerShell for both simple and complex paths
+    $testSimplePath = "c:\games\app.exe"
+    $psSimpleHash = Get-PortableHash -InputString $testSimplePath
     $testComplexPath = "C:\Games & Tools (2024)\CrashReporter!.exe"
     $psTargetHash = Get-PortableHash -InputString $testComplexPath
     
-    # Run batch hash calculation
+    # Run batch hash calculation for complex path
     $batchTestCmd = @"
 @echo off
 setlocal DisableDelayedExpansion
@@ -306,10 +308,39 @@ echo !RULE_HASH!
     $batchHashOutput = if ($rawBatOut) { ($rawBatOut | Out-String).Trim() } else { "" }
     Remove-Item $tmpBat -Force -ErrorAction SilentlyContinue
 
-    if ($batchHashOutput -eq $psTargetHash -and $batchHashOutput -eq "8C422CDA") {
-        Write-Host "  -> PASS: Batch engine SHA256 hash matches PowerShell ($batchHashOutput == $psTargetHash)." -ForegroundColor Green
+    # Run batch hash calculation for simple path ("c:\games\app.exe" -> B42ACF78)
+    $batchSimpleCmd = @"
+@echo off
+setlocal DisableDelayedExpansion
+set "P=$testSimplePath"
+setlocal EnableDelayedExpansion
+set "LOWER=!P!"
+for %%A in (a b c d e f g h i j k l m n o p q r s t u v w x y z) do set "LOWER=!LOWER:%%A=%%A!"
+set "TMP_H=%TEMP%\_test_hash2_%RANDOM%.tmp"
+<nul set /p="!LOWER!">"!TMP_H!" 2>nul
+set "RULE_HASH="
+for /f "skip=1 delims=" %%H in ('certutil -hashfile "!TMP_H!" SHA256 2^>nul') do (
+    if not defined RULE_HASH (
+        set "H=%%H"
+        set "H=!H: =!"
+        set "RULE_HASH=!H:~0,8!"
+    )
+)
+if exist "!TMP_H!" del "!TMP_H!" >nul 2>&1
+for %%A in (A B C D E F G H I J K L M N O P Q R S T U V W X Y Z) do set "RULE_HASH=!RULE_HASH:%%A=%%A!"
+echo !RULE_HASH!
+"@
+    $tmpBat2 = Join-Path $env:TEMP "test_batch_hash2.bat"
+    [System.IO.File]::WriteAllText($tmpBat2, $batchSimpleCmd, [System.Text.Encoding]::ASCII)
+    $rawBatOut2 = & cmd.exe /c $tmpBat2
+    $batchSimpleOutput = if ($rawBatOut2) { ($rawBatOut2 | Out-String).Trim() } else { "" }
+    Remove-Item $tmpBat2 -Force -ErrorAction SilentlyContinue
+
+    if ($batchHashOutput -eq $psTargetHash -and $batchHashOutput -eq "8C422CDA" -and
+        $batchSimpleOutput -eq $psSimpleHash -and $batchSimpleOutput -eq "B42ACF78") {
+        Write-Host "  -> PASS: Batch engine SHA256 path hashes match PowerShell ('c:\games\app.exe' -> $batchSimpleOutput == $psSimpleHash; 'CrashReporter!.exe' -> $batchHashOutput == $psTargetHash)." -ForegroundColor Green
     } else {
-        Write-Host "  -> FAIL: Batch hash parity check failed. Batch: '$batchHashOutput', PS: '$psTargetHash'." -ForegroundColor Red
+        Write-Host "  -> FAIL: Batch hash parity check failed. Batch Simple: '$batchSimpleOutput' (expected $psSimpleHash), Batch Complex: '$batchHashOutput' (expected $psTargetHash)." -ForegroundColor Red
         exit 1
     }
 
