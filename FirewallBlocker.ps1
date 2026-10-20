@@ -1473,6 +1473,21 @@ function Show-FirewallMMC {
     }
 }
 
+function Resolve-ActionTargetMode {
+    param([string]$RequestedAction)
+    if ([string]::IsNullOrEmpty($RequestedAction)) { return $null }
+    switch -Regex ($RequestedAction) {
+        '^(BlockAll|BlockBoth|Both)$'                        { return "Both" }
+        '^(BlockOutbound(Only)?|Outbound)$'                 { return "OutboundOnly" }
+        '^(BlockInbound(Only)?|Inbound)$'                   { return "InboundOnly" }
+        '^(UnblockDir|Unblock)$'                             { return "UnblockDir" }
+        '^(UnblockAll|Purge)$'                               { return "UnblockAll" }
+        '^(Scan|Audit|List)$'                                { return "Scan" }
+        '^(RepairService|RestartService|Repair|FixService)$' { return "RepairService" }
+        default                                              { return $null }
+    }
+}
+
 # ------------------------------------------------------------------------------
 # 8. Main Interactive Menu & CLI Dispatcher
 # ------------------------------------------------------------------------------
@@ -1486,19 +1501,21 @@ if ($ExportFunctionsOnly) {
 # Non-interactive CLI Execution Dispatch
 if (-not [string]::IsNullOrEmpty($Action)) {
     $actionSuccess = $true
-    switch -Regex ($Action) {
-        '^(BlockAll|BlockBoth|Both)$'              { $actionSuccess = Invoke-BlockOperation -Dir $Script:CurrentTarget -Mode "Both" }
-        '^(BlockOutbound(Only)?|Outbound)$'       { $actionSuccess = Invoke-BlockOperation -Dir $Script:CurrentTarget -Mode "OutboundOnly" }
-        '^(BlockInbound(Only)?|Inbound)$'         { $actionSuccess = Invoke-BlockOperation -Dir $Script:CurrentTarget -Mode "InboundOnly" }
-        '^(UnblockDir|Unblock)$'                   { $actionSuccess = Invoke-UnblockOperation -Dir $Script:CurrentTarget }
-        '^(UnblockAll|Purge)$'                     { $actionSuccess = Invoke-UnblockAllSystem }
-        '^(Scan|Audit|List)$'                      { $actionSuccess = Invoke-ScanAudit -Dir $Script:CurrentTarget }
-        '^(RepairService|RestartService|Repair|FixService)$' { $actionSuccess = Ensure-FirewallServiceRunning }
-        default {
-            Write-Host "Unknown Action: $Action. Valid actions: BlockBoth, BlockOutbound, BlockInbound, UnblockDir, UnblockAll, Scan, RepairService." -ForegroundColor Red
-            Cleanup-TempElevationScript
-            exit 1
-        }
+    $targetMode = Resolve-ActionTargetMode -RequestedAction $Action
+    if ($null -eq $targetMode) {
+        Write-Host "Unknown Action: $Action. Valid actions: BlockBoth, BlockOutbound, BlockInbound, UnblockDir, UnblockAll, Scan, RepairService." -ForegroundColor Red
+        Cleanup-TempElevationScript
+        exit 1
+    }
+
+    switch ($targetMode) {
+        "Both"           { $actionSuccess = Invoke-BlockOperation -Dir $Script:CurrentTarget -Mode "Both" }
+        "OutboundOnly"   { $actionSuccess = Invoke-BlockOperation -Dir $Script:CurrentTarget -Mode "OutboundOnly" }
+        "InboundOnly"    { $actionSuccess = Invoke-BlockOperation -Dir $Script:CurrentTarget -Mode "InboundOnly" }
+        "UnblockDir"     { $actionSuccess = Invoke-UnblockOperation -Dir $Script:CurrentTarget }
+        "UnblockAll"     { $actionSuccess = Invoke-UnblockAllSystem }
+        "Scan"           { $actionSuccess = Invoke-ScanAudit -Dir $Script:CurrentTarget }
+        "RepairService"  { $actionSuccess = Ensure-FirewallServiceRunning }
     }
 
     if ($NonInteractive) {

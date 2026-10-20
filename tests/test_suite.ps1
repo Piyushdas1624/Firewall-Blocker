@@ -422,34 +422,23 @@ echo !RULE_HASH!
         "RestartService"    = "RepairService"
     }
 
-    $dispatcherRegex = {
-        param([string]$act)
-        switch -Regex ($act) {
-            '^(BlockAll|BlockBoth|Both)$'              { return "Both" }
-            '^(BlockOutbound(Only)?|Outbound)$'       { return "OutboundOnly" }
-            '^(BlockInbound(Only)?|Inbound)$'         { return "InboundOnly" }
-            '^(UnblockDir|Unblock)$'                   { return "UnblockDir" }
-            '^(UnblockAll|Purge)$'                     { return "UnblockAll" }
-            '^(Scan|Audit|List)$'                      { return "Scan" }
-            '^(RepairService|RestartService|Repair|FixService)$' { return "RepairService" }
-            default { return "UNKNOWN" }
-        }
-    }
+    # Import Resolve-ActionTargetMode directly from script
+    . $blockerPs1 -ExportFunctionsOnly
 
     $actionsValid = $true
     foreach ($actionName in $actionsToTest.Keys) {
-        $resolvedMode = & $dispatcherRegex $actionName
+        $resolvedMode = Resolve-ActionTargetMode -RequestedAction $actionName
         if ($resolvedMode -ne $actionsToTest[$actionName]) {
             Write-Host "  -> FAIL: Action '$actionName' resolved to '$resolvedMode', expected '$($actionsToTest[$actionName])'" -ForegroundColor Red
             $actionsValid = $false
         }
     }
-    if ((& $dispatcherRegex "InvalidActionXYZ") -ne "UNKNOWN") {
+    if ($null -ne (Resolve-ActionTargetMode -RequestedAction "InvalidActionXYZ")) {
         Write-Host "  -> FAIL: 'InvalidActionXYZ' was unexpectedly accepted" -ForegroundColor Red
         $actionsValid = $false
     }
     if ($actionsValid) {
-        Write-Host "  -> PASS: All action dispatch modes (including BlockOutboundOnly & BlockInboundOnly) verified cleanly." -ForegroundColor Green
+        Write-Host "  -> PASS: All action dispatch modes (including BlockOutboundOnly & BlockInboundOnly) verified cleanly via Resolve-ActionTargetMode." -ForegroundColor Green
     } else {
         exit 1
     }
