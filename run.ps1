@@ -1269,6 +1269,7 @@ function Invoke-BlockOperation {
 
         $inRuleName = Get-RuleName -Direction "IN" -ExeName $exeName -FullPath $exePath
         $outRuleName = Get-RuleName -Direction "OUT" -ExeName $exeName -FullPath $exePath
+        $cleanExeName = $exeName.Replace('"', '')
         $cleanExePath = $exePath.Trim('"', "'")
         $desc = ("Blocked by FirewallBlocker - " + $cleanExePath).Replace('"', '').Replace('|', '-')
         if ($desc.Length -gt 500) { $desc = $desc.Substring(0, 500) }
@@ -1279,10 +1280,10 @@ function Invoke-BlockOperation {
         # Inbound Rule
         if ($Mode -eq "Both" -or $Mode -eq "InboundOnly") {
             $null = Invoke-Netsh -Arguments "advfirewall firewall delete rule name=`"$inRuleName`""
-            $null = Invoke-Netsh -Arguments "advfirewall firewall delete rule name=`"[FWB-IN] $($exeName.Replace('"', ''))`" program=`"$exePath`""
-            $null = Invoke-Netsh -Arguments "advfirewall firewall delete rule name=`"[FolderBlock-IN] $exeName`" program=`"$exePath`""
+            $null = Invoke-Netsh -Arguments "advfirewall firewall delete rule name=`"[FWB-IN] $cleanExeName`" program=`"$cleanExePath`""
+            $null = Invoke-Netsh -Arguments "advfirewall firewall delete rule name=`"[FolderBlock-IN] $cleanExeName`" program=`"$cleanExePath`""
 
-            $addArgs = "advfirewall firewall add rule name=`"$inRuleName`" dir=in action=block program=`"$exePath`" enable=yes profile=any description=`"$desc`""
+            $addArgs = "advfirewall firewall add rule name=`"$inRuleName`" dir=in action=block program=`"$cleanExePath`" enable=yes profile=any description=`"$desc`""
             $resIn = Invoke-Netsh -Arguments $addArgs
 
             if ($resIn.Success) {
@@ -1311,10 +1312,10 @@ function Invoke-BlockOperation {
         # Outbound Rule
         if ($Mode -eq "Both" -or $Mode -eq "OutboundOnly") {
             $null = Invoke-Netsh -Arguments "advfirewall firewall delete rule name=`"$outRuleName`""
-            $null = Invoke-Netsh -Arguments "advfirewall firewall delete rule name=`"[FWB-OUT] $($exeName.Replace('"', ''))`" program=`"$exePath`""
-            $null = Invoke-Netsh -Arguments "advfirewall firewall delete rule name=`"[FolderBlock-OUT] $exeName`" program=`"$exePath`""
+            $null = Invoke-Netsh -Arguments "advfirewall firewall delete rule name=`"[FWB-OUT] $cleanExeName`" program=`"$cleanExePath`""
+            $null = Invoke-Netsh -Arguments "advfirewall firewall delete rule name=`"[FolderBlock-OUT] $cleanExeName`" program=`"$cleanExePath`""
 
-            $addArgs = "advfirewall firewall add rule name=`"$outRuleName`" dir=out action=block program=`"$exePath`" enable=yes profile=any description=`"$desc`""
+            $addArgs = "advfirewall firewall add rule name=`"$outRuleName`" dir=out action=block program=`"$cleanExePath`" enable=yes profile=any description=`"$desc`""
             $resOut = Invoke-Netsh -Arguments $addArgs
 
             if ($resOut.Success) {
@@ -1464,13 +1465,15 @@ function Invoke-UnblockOperation {
 
         Write-Host ("  [{0,3}/{1,-3}] Unblocking: {2}" -f $processedCount, $exes.Count, $exeName) -ForegroundColor White
 
+        $cleanExeName = $exeName.Replace('"', '')
+        $cleanExePath = $exePath.Trim('"', "'")
         $rulesToDelete = @(
             @{ Name = $inRuleName; Program = $null },
             @{ Name = $outRuleName; Program = $null },
-            @{ Name = "[FWB-IN] $($exeName.Replace('"', ''))"; Program = $exePath },
-            @{ Name = "[FWB-OUT] $($exeName.Replace('"', ''))"; Program = $exePath },
-            @{ Name = "[FolderBlock-IN] $exeName"; Program = $exePath },
-            @{ Name = "[FolderBlock-OUT] $exeName"; Program = $exePath }
+            @{ Name = "[FWB-IN] $cleanExeName"; Program = $cleanExePath },
+            @{ Name = "[FWB-OUT] $cleanExeName"; Program = $cleanExePath },
+            @{ Name = "[FolderBlock-IN] $cleanExeName"; Program = $cleanExePath },
+            @{ Name = "[FolderBlock-OUT] $cleanExeName"; Program = $cleanExePath }
         )
 
         foreach ($r in $rulesToDelete) {

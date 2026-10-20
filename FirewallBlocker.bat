@@ -105,15 +105,18 @@ set "CHOICE="
 set /p "CHOICE=Select an option [1-8, A]: "
 
 if not defined CHOICE goto MENU
-if /i "%CHOICE:"=%"=="1" goto CHECK_AND_BLOCK_BOTH
-if /i "%CHOICE:"=%"=="2" goto CHECK_AND_BLOCK_OUT
-if /i "%CHOICE:"=%"=="3" goto CHECK_AND_BLOCK_IN
-if /i "%CHOICE:"=%"=="4" goto CHECK_AND_UNBLOCK
-if /i "%CHOICE:"=%"=="5" goto CHECK_AND_SCAN
-if /i "%CHOICE:"=%"=="6" goto CHANGE_DIR
-if /i "%CHOICE:"=%"=="7" goto OPEN_WF
-if /i "%CHOICE:"=%"=="A" goto TOGGLE_ADVANCED
-if /i "%CHOICE:"=%"=="8" goto QUIT
+set "CHOICE=%CHOICE:"=%"
+set "CHOICE=%CHOICE: =%"
+if not defined CHOICE goto MENU
+if /i "%CHOICE%"=="1" goto CHECK_AND_BLOCK_BOTH
+if /i "%CHOICE%"=="2" goto CHECK_AND_BLOCK_OUT
+if /i "%CHOICE%"=="3" goto CHECK_AND_BLOCK_IN
+if /i "%CHOICE%"=="4" goto CHECK_AND_UNBLOCK
+if /i "%CHOICE%"=="5" goto CHECK_AND_SCAN
+if /i "%CHOICE%"=="6" goto CHANGE_DIR
+if /i "%CHOICE%"=="7" goto OPEN_WF
+if /i "%CHOICE%"=="A" goto TOGGLE_ADVANCED
+if /i "%CHOICE%"=="8" goto QUIT
 goto MENU
 
 :TOGGLE_ADVANCED
@@ -138,35 +141,39 @@ echo ===========================================================================
 echo.
 set "CONF_ADV="
 set /p "CONF_ADV=Enable Advanced / Power User Mode? [Y/N]: "
-if /i "%CONF_ADV:"=%"=="Y" (
-    set "ADVANCED_MODE=1"
-    echo.
-    echo  [OK] Advanced / Power User Mode ENABLED. Folder restrictions overridden.
-    timeout /t 2 >nul 2>&1
-) else (
-    echo.
-    echo  [CANCEL] Advanced Mode not enabled.
-    timeout /t 1 >nul 2>&1
-)
+if not defined CONF_ADV goto CANCEL_ADV
+set "CONF_ADV=%CONF_ADV:"=%"
+set "CONF_ADV=%CONF_ADV: =%"
+if /i not "%CONF_ADV%"=="Y" goto CANCEL_ADV
+set "ADVANCED_MODE=1"
+echo.
+echo  [OK] Advanced / Power User Mode ENABLED. Folder restrictions overridden.
+timeout /t 2 >nul 2>&1
+goto MENU
+
+:CANCEL_ADV
+echo.
+echo  [CANCEL] Advanced Mode not enabled.
+timeout /t 1 >nul 2>&1
 goto MENU
 
 :CHECK_DIR_SET
-if not defined TARGET_DIR (
-    cls
-    echo ==============================================================================
-    echo  [!] Target folder is not set. Please enter or drag-and-drop a folder:
-    echo ==============================================================================
-    set "INPUT_DIR="
-    set /p "INPUT_DIR=Folder Path: "
-    if defined INPUT_DIR (
-        for %%I in ("%INPUT_DIR:"=%") do (
-            if exist "%%~fI" (
-                set "TARGET_DIR=%%~fI"
-            ) else (
-                echo  [!] Directory not found: "%%~fI"
-                timeout /t 2 >nul 2>&1
-            )
-        )
+if defined TARGET_DIR exit /b 0
+cls
+echo ==============================================================================
+echo  [!] Target folder is not set. Please enter or drag-and-drop a folder:
+echo ==============================================================================
+set "INPUT_DIR="
+set /p "INPUT_DIR=Folder Path: "
+if not defined INPUT_DIR exit /b 0
+set "INPUT_DIR=%INPUT_DIR:"=%"
+if not defined INPUT_DIR exit /b 0
+for %%I in ("%INPUT_DIR%") do (
+    if exist "%%~fI" (
+        set "TARGET_DIR=%%~fI"
+    ) else (
+        echo  [!] Directory not found: "%%~fI"
+        timeout /t 2 >nul 2>&1
     )
 )
 exit /b 0
@@ -279,7 +286,9 @@ echo.
 set "NEW_DIR="
 set /p "NEW_DIR=Enter folder path (or press Enter to cancel): "
 if not defined NEW_DIR goto MENU
-for %%I in ("%NEW_DIR:"=%") do (
+set "NEW_DIR=%NEW_DIR:"=%"
+if not defined NEW_DIR goto MENU
+for %%I in ("%NEW_DIR%") do (
     if exist "%%~fI" (
         set "TARGET_DIR=%%~fI"
         call :CHECK_PROTECTED

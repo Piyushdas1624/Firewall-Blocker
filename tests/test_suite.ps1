@@ -228,6 +228,9 @@ try {
     $fakeDescError = Format-HumanFirewallError -RawOutput "The description contains invalid characters, or is an invalid length." -ExitCode 1 -ExePath "C:\Program Files (x86)\AutoCAD 2007\acad.exe" -Direction "INBOUND" -RuleName "[FWB-IN] acad.exe"
     $fakeNetshUsage = "The description contains invalid characters, or is an invalid length.`r`nUsage: add rule name=<string>`r`n      [localport=0-65535|<port range>[,...]|RPC|RPC-EPMap|IPHTTPS|any (default=any)]"
     $fakeUsageDiag = Format-HumanFirewallError -RawOutput $fakeNetshUsage -ExitCode 1 -ExePath "C:\Program Files (x86)\AutoCAD 2007\acad.exe" -Direction "INBOUND" -RuleName "[FWB-IN] acad.exe"
+    $fakeSyntaxUsage = "A specified value is not valid.`r`nUsage: add rule name=<string>`r`n      [localport=0-65535|<port range>[,...]|RPC|RPC-EPMap|IPHTTPS|any (default=any)]"
+    $fakeSyntaxDiag = Format-HumanFirewallError -RawOutput $fakeSyntaxUsage -ExitCode 1 -ExePath "C:\Program Files (x86)\AutoCAD 2007\acad.exe" -Direction "INBOUND" -RuleName "[FWB-IN] acad.exe"
+    $fakeRealRpc = Format-HumanFirewallError -RawOutput "The RPC server is unavailable." -ExitCode 1 -ExePath "C:\Game\app.exe" -Direction "INBOUND" -RuleName "[FWB-IN] app.exe"
 
     if ($fakeElevError.Location -eq "Windows Security Token (UAC)" -and
         $fakeSvcError.Location  -eq "Windows Service Manager (MpsSvc)" -and
@@ -235,8 +238,11 @@ try {
         $fakePathError.Location -eq "Win32 File Subsystem (MAX_PATH)" -and
         $fakeDescError.Location -eq "Command Parser / Rule Parameter" -and
         $fakeUsageDiag.Location -eq "Command Parser / Rule Parameter" -and
-        $fakeUsageDiag.Location -ne "Windows Service Manager (MpsSvc)") {
-        Write-Host "  -> PASS: Human error diagnostics properly pinpoint Location, Root Cause, and Fix across all categories (including invalid characters and netsh usage screens without false RPC triggers)." -ForegroundColor Green
+        $fakeSyntaxDiag.Location -eq "Command Parser" -and
+        $fakeRealRpc.Location   -eq "Windows Service Manager (MpsSvc)" -and
+        $fakeUsageDiag.Location -ne "Windows Service Manager (MpsSvc)" -and
+        $fakeSyntaxDiag.Location -ne "Windows Service Manager (MpsSvc)") {
+        Write-Host "  -> PASS: Human error diagnostics properly pinpoint Location, Root Cause, and Fix across all categories (including invalid characters, syntax errors, and real RPC failures without false MpsSvc triggers)." -ForegroundColor Green
     } else {
         Write-Host "  -> FAIL: Human error diagnostic mapping failed." -ForegroundColor Red
         exit 1
@@ -273,15 +279,17 @@ try {
     $hasOverDestructive = ($batContent -match 'netsh\s+advfirewall\s+firewall\s+delete\s+rule\s+name=all\s+program=')
     # Invariant 3: No corrupting delayed expansion substitution on input paths
     $hasDelayedSubTrap = ($batContent -match 'setlocal\s+EnableDelayedExpansion\s+set\s+"CLEAN_DIR=!(?:INPUT|NEW)_DIR:"=!')
-    # Invariant 4: No parenthesized confirmation blocks that cause parse-time expansion crashes
-    $hasParenConfirmTrap = ($batContent -match 'if\s+["'']?%IS_(?:SENSITIVE|SYSTEM_OVERRIDDEN)%["'']?==["'']?1["'']?\s*\([^)]*set\s+/p\s+["'']?CONFIRM')
+    # Invariant 4: No parenthesized prompt blocks that cause parse-time expansion crashes
+    $hasParenPromptTrap = ($batContent -match '(?s)if\s+[^\r\n(]*\((?:(?!\n\s*\)).)*?set\s+/p\s+')
     # Invariant 5: No pipe characters in netsh rule descriptions (causes netsh syntax invalid character crash)
     $hasPipeInDesc = ($batContent -match 'description="[^"]*\|[^"]*"')
+    # Invariant 6: No un-sanitized substring substitution directly inside if conditions
+    $hasUncheckedVarSub = ($batContent -match 'if\s+(?:/i\s+)?["'']?%(?:CHOICE|CONF_ADV|CONFIRM|CONFIRM_ADV|CONFIRM_ADV_UNB|INPUT_DIR|NEW_DIR):[^%]+%["'']?==')
 
-    if (-not $hasScopeTrap -and -not $hasOverDestructive -and -not $hasDelayedSubTrap -and -not $hasParenConfirmTrap -and -not $hasPipeInDesc) {
-        Write-Host "  -> PASS: FirewallBlocker.bat verified free of variable scope traps, destructive deletions, parse-time parenthesized prompt traps, and illegal pipe descriptions." -ForegroundColor Green
+    if (-not $hasScopeTrap -and -not $hasOverDestructive -and -not $hasDelayedSubTrap -and -not $hasParenPromptTrap -and -not $hasPipeInDesc -and -not $hasUncheckedVarSub) {
+        Write-Host "  -> PASS: FirewallBlocker.bat verified free of variable scope traps, destructive deletions, parse-time parenthesized prompt traps, unchecked variable substitutions, and illegal pipe descriptions." -ForegroundColor Green
     } else {
-        Write-Host "  -> FAIL: FirewallBlocker.bat failed code invariants (scope: $hasScopeTrap, over-destructive: $hasOverDestructive, delayed sub: $hasDelayedSubTrap, paren confirm: $hasParenConfirmTrap, pipe desc: $hasPipeInDesc)." -ForegroundColor Red
+        Write-Host "  -> FAIL: FirewallBlocker.bat failed code invariants (scope: $hasScopeTrap, over-destructive: $hasOverDestructive, delayed sub: $hasDelayedSubTrap, paren prompt: $hasParenPromptTrap, pipe desc: $hasPipeInDesc, unchecked var sub: $hasUncheckedVarSub)." -ForegroundColor Red
         exit 1
     }
 
@@ -784,16 +792,92 @@ exit /b 0
     $exitCodeY = $LASTEXITCODE
     $outY = if ($rawOutY) { ($rawOutY | Out-String).Trim() } else { "" }
 
+    # Test Empty / Enter path (simulate user pressing Enter on prompt)
+    $rawOutEmpty = cmd.exe /c "echo. | `"$tmpBatConfirm`""
+    $exitCodeEmpty = $LASTEXITCODE
+    $outEmpty = if ($rawOutEmpty) { ($rawOutEmpty | Out-String).Trim() } else { "" }
+
     Remove-Item $tmpBatConfirm -Force -ErrorAction SilentlyContinue
 
-    $hasCrashError = ($outN -match "unexpected at this time" -or $outY -match "unexpected at this time")
+    $hasCrashError = ($outN -match "unexpected at this time" -or $outY -match "unexpected at this time" -or $outEmpty -match "unexpected at this time")
     $cancelOk = ($outN -match "\[CONFIRM_CANCELLED_CLEANLY\]" -and $exitCodeN -eq 0)
     $acceptOk = ($outY -match "\[CONFIRM_ACCEPTED_CLEANLY\]" -and $exitCodeY -eq 0)
+    $emptyOk  = ($outEmpty -match "\[CONFIRM_CANCELLED_CLEANLY\]" -and $exitCodeEmpty -eq 0)
 
-    if (-not $hasCrashError -and $cancelOk -and $acceptOk) {
-        Write-Host "  -> PASS: Batch confirmation on '$test86Dir' executed without parse-time crash (Cancel & Accept verified cleanly)." -ForegroundColor Green
+    if (-not $hasCrashError -and $cancelOk -and $acceptOk -and $emptyOk) {
+        Write-Host "  -> PASS: Batch confirmation on '$test86Dir' executed without parse-time crash (Cancel, Accept & Enter verified cleanly)." -ForegroundColor Green
     } else {
-        Write-Host "  -> FAIL: Batch confirmation crashed or misbehaved (Crash: $hasCrashError, CancelOk: $cancelOk, AcceptOk: $acceptOk, OutN: $outN, OutY: $outY)." -ForegroundColor Red
+        Write-Host "  -> FAIL: Batch confirmation crashed or misbehaved (Crash: $hasCrashError, CancelOk: $cancelOk, AcceptOk: $acceptOk, EmptyOk: $emptyOk, OutN: $outN, OutY: $outY, OutEmpty: $outEmpty)." -ForegroundColor Red
+        exit 1
+    }
+
+    # Test CHECK_DIR_SET & TOGGLE_ADVANCED against parse-time expansion crashes
+    $testPromptScript = @"
+@echo off
+setlocal DisableDelayedExpansion
+set "TARGET_DIR="
+set "ADVANCED_MODE=0"
+
+:: 1. Test CHECK_DIR_SET when undefined
+call :CHECK_DIR_SET
+if not defined TARGET_DIR (
+    echo [FAIL_DIR_NOT_SET]
+    exit /b 1
+)
+echo [CHECK_DIR_SET_OK: %TARGET_DIR%]
+
+:: 2. Test TOGGLE_ADVANCED with empty / cancel
+call :TOGGLE_ADVANCED
+echo [TOGGLE_ADVANCED_OK: %ADVANCED_MODE%]
+exit /b 0
+
+:CHECK_DIR_SET
+if defined TARGET_DIR exit /b 0
+set "INPUT_DIR="
+set /p "INPUT_DIR=Folder Path: "
+if not defined INPUT_DIR exit /b 0
+set "INPUT_DIR=%INPUT_DIR:"=%"
+if not defined INPUT_DIR exit /b 0
+for %%I in ("%INPUT_DIR%") do (
+    if exist "%%~fI" (
+        set "TARGET_DIR=%%~fI"
+    ) else (
+        set "TARGET_DIR=%%~fI"
+    )
+)
+exit /b 0
+
+:TOGGLE_ADVANCED
+set "CONF_ADV="
+set /p "CONF_ADV=Enable [Y/N]: "
+if not defined CONF_ADV goto CANCEL_ADV
+set "CONF_ADV=%CONF_ADV:"=%"
+set "CONF_ADV=%CONF_ADV: =%"
+if /i not "%CONF_ADV%"=="Y" goto CANCEL_ADV
+set "ADVANCED_MODE=1"
+exit /b 0
+:CANCEL_ADV
+set "ADVANCED_MODE=0"
+exit /b 0
+"@
+    $tmpPromptBat = Join-Path $env:TEMP "test_prompts.bat"
+    [System.IO.File]::WriteAllText($tmpPromptBat, $testPromptScript, [System.Text.Encoding]::ASCII)
+
+    # Feed test path then Enter (empty line) via native cmd pipeline to avoid .NET StreamWriter BOM
+    $feedCmd = "(echo C:\Windows& echo.) | `"$tmpPromptBat`""
+    $rawPromptOut = cmd.exe /c $feedCmd
+    $promptOut = if ($rawPromptOut) { ($rawPromptOut | Out-String).Trim() } else { "" }
+
+    Remove-Item $tmpPromptBat -Force -ErrorAction SilentlyContinue
+
+    $hasPromptCrash = ($promptOut -match "unexpected at this time")
+    $dirSetOk = ($promptOut -match "\[CHECK_DIR_SET_OK: C:\\Windows\]")
+    $toggleOk = ($promptOut -match "\[TOGGLE_ADVANCED_OK: 0\]")
+
+    if (-not $hasPromptCrash -and $dirSetOk -and $toggleOk) {
+        Write-Host "  -> PASS: CHECK_DIR_SET and TOGGLE_ADVANCED verified free of parse-time crashes and handle empty inputs cleanly." -ForegroundColor Green
+    } else {
+        Write-Host "  -> FAIL: Batch prompts failed or crashed (Crash: $hasPromptCrash, DirSetOk: $dirSetOk, ToggleOk: $toggleOk, Output: $promptOut)." -ForegroundColor Red
         exit 1
     }
 
@@ -844,6 +928,16 @@ exit /b 0
         Write-Host "  -> FAIL: Netsh rejected parameters with invalid characters or usage error: $testOut" -ForegroundColor Red
         exit 1
     }
+
+    # Clean up test rule if it was added
+    $cleanDelPsi = New-Object System.Diagnostics.ProcessStartInfo
+    $cleanDelPsi.FileName = "netsh.exe"
+    $cleanDelPsi.Arguments = "advfirewall firewall delete rule name=`"$inRule`""
+    $cleanDelPsi.RedirectStandardOutput = $true
+    $cleanDelPsi.UseShellExecute = $false
+    $cleanDelPsi.CreateNoWindow = $true
+    $delProc = [System.Diagnostics.Process]::Start($cleanDelPsi)
+    $null = $delProc.WaitForExit(3000)
 
     # Verify Ensure-FirewallServiceRunning with -Restart does not fail with Access Denied (5)
     $restartCheck = Ensure-FirewallServiceRunning -Restart
